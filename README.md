@@ -1,70 +1,55 @@
-# Tiny Systems Example Module
+# Tiny Systems LLM Module
 
-Template repository for building your own Tiny Systems module. Fork this repo to get started.
+LLM completion components for Tiny Systems flows.
 
-## What's Included
+## Components
 
-A minimal Echo component that receives a message and passes it through:
+| Name | Purpose |
+|---|---|
+| `llm_complete` | Single-turn completion via the Anthropic Messages API. Supports prompt caching on the system prompt. Emits `text`, `model`, `stopReason`, and detailed `usage` (input/output/cache_read/cache_creation tokens). |
 
-```go
-func (t *Component) Handle(ctx context.Context, handler module.Handler, port string, msg interface{}) any {
-    if in, ok := msg.(InMessage); ok {
-        return handler(ctx, OutPort, in.Context)
-    }
-    return fmt.Errorf("invalid message")
-}
+## Settings
+
+| Field | Default | Notes |
+|---|---|---|
+| `model` | `claude-haiku-4-5` | Any Anthropic model id (Haiku/Sonnet/Opus). |
+| `systemPrompt` | *(empty)* | Sent as system role on every call. |
+| `cacheSystem` | `false` | Mark the system prompt as `ephemeral`. Lets identical subsequent calls hit Anthropic's prompt cache. |
+| `maxTokens` | `1024` | Output token cap. |
+| `temperature` | `0` | Set higher for sampling diversity. |
+| `timeoutSeconds` | `60` | Per-request HTTP timeout. |
+
+The API key flows in via the input message (`apiKey`), not via component settings — same context-passthrough pattern other Tiny Systems modules use for credentials.
+
+## Retryable errors
+
+The error port emits `retryable=true` on:
+- `429` (rate limit)
+- `529` (Anthropic overloaded)
+- `5xx` (server errors)
+- network-level failures
+
+Wire the error port to a delay→retry loop or a router that distinguishes retryable vs permanent failures.
+
+## Pattern: scoring loop
+
+```
+prefilter:matched → llm_complete (system: "You score posts 0-100…", cacheSystem: true)
+                       ├── response → json_decode → router (score > threshold) → alert
+                       └── error    → router (retryable) → delay → loop back to llm_complete
 ```
 
-This demonstrates the core patterns:
-- Component interface (`GetInfo`, `Handle`, `Ports`, `Instance`)
-- Input/output ports with typed messages
-- Handler response propagation (blocking I/O)
-- `configurable:"true"` struct tag for edge data mapping
-
-## Project Structure
-
-```
-cmd/main.go              # Entry point — registers components, runs CLI
-components/echo/echo.go  # Example component
-go.mod                   # SDK dependency (github.com/tiny-systems/module)
-```
-
-## Getting Started
-
-1. **Use this template** — click "Use this template" on GitHub
-2. **Rename the module** in `go.mod`
-3. **Add your components** under `components/`
-4. **Register them** via `init()` + `registry.Register()`
+The system prompt + product descriptions stay cached across all calls in the same minute, so per-call cost drops significantly.
 
 ## Run Locally
 
 ```shell
 go run cmd/main.go run \
-  --name=my-org/my-module-v1 \
+  --name=tiny-systems/llm-module-v0 \
   --namespace=tinysystems \
-  --version=1.0.0
+  --version=0.1.0
 ```
-
-## Build and Deploy
-
-```shell
-# Build container image
-docker build -t myregistry/my-module:1.0.0 .
-docker push myregistry/my-module:1.0.0
-
-# Install via Helm
-helm repo add tinysystems https://tiny-systems.github.io/module/
-helm install my-module tinysystems/tinysystems-operator \
-  --set controllerManager.manager.image.repository=myregistry/my-module
-```
-
-## Resources
-
-- [Developer Guide](https://docs.tinysystems.io/developer-guide/getting-started/hello-world-component) — build your first component
-- [Module SDK](https://github.com/tiny-systems/module) — core library
-- [Component Examples](https://docs.tinysystems.io/examples/components/simple-transformer) — real-world patterns
-- [Tiny Systems Platform](https://tinysystems.io) — visual editor and module directory
 
 ## License
 
-This module's source code is MIT-licensed. It depends on the [Tiny Systems Module SDK](https://github.com/tiny-systems/module) (BSL 1.1). See [LICENSE](LICENSE) for details.
+MIT for this module's source. Depends on [Tiny Systems Module SDK](https://github.com/tiny-systems/module) (BSL 1.1).
