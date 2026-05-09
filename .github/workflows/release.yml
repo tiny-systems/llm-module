@@ -17,3 +17,15 @@ jobs:
           echo "Module name ${{ github.event.repository.name }}"
           go mod tidy
           go run cmd/main.go tools build --version ${{github.ref_name}} --name github.com/${{ github.repository }} --devkey ${{secrets.TINY_DEV_SECRET}}
+
+      - name: Notify e2e
+        if: success()
+        env:
+          MODULE_NAME: ${{ github.event.repository.name }}
+          MODULE_VERSION: ${{ github.ref_name }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.E2E_DISPATCH_TOKEN }}
+          repository: tiny-systems/e2e
+          event-type: module-released
+          client-payload: '{"module":"${{ env.MODULE_NAME }}","version":"${{ env.MODULE_VERSION }}"}'
