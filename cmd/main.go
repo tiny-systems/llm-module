@@ -11,12 +11,13 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	_ "github.com/tiny-systems/llm-module/components/llmcomplete"
+	_ "github.com/tiny-systems/llm-module/components/llmrouter"
 	"github.com/tiny-systems/module/cli"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "server",
-	Short: "tiny-system's LLM module — Anthropic completion components",
+	Short: "Tiny Systems LLM module — Anthropic completion and routing components",
 	Run: func(cmd *cobra.Command, args []string) {
 		_ = cmd.Help()
 	},

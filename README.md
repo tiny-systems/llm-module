@@ -1,12 +1,35 @@
 # Tiny Systems LLM Module
 
-LLM completion components for Tiny Systems flows.
+LLM components for Tiny Systems flows — completion and agentic routing.
 
 ## Components
 
 | Name | Purpose |
 |---|---|
 | `llm_complete` | Single-turn completion via the Anthropic Messages API. Supports prompt caching on the system prompt. Emits `text`, `model`, `stopReason`, and detailed `usage` (input/output/cache_read/cache_creation tokens). |
+| `llm_router` | Route a message to one of N output ports based on LLM judgement. Configure routes as `{name, description}` pairs; each becomes an `out_<name>` source port. Emits Context-only (same shape as deterministic router). Decision metadata (chosen route, confidence, reasoning, token usage) lands on the trace span as attributes. |
+
+## `llm_router`
+
+Use when boolean routing conditions would be too many or too fuzzy to enumerate. Common cases: ticket triage, intent classification, content moderation, support escalation.
+
+| Setting | Default | Notes |
+|---|---|---|
+| `routes` | required | `[{name, description}]`. Description tells the LLM when to pick this route. |
+| `model` | `claude-haiku-4-5` | Haiku is cheap and fast for classification (~$0.0001/call). |
+| `systemPrompt` | *(empty)* | Optional task framing ("You are triaging support tickets"). |
+| `confidenceThreshold` | `0` | If `enableDefaultPort=true`, routes below this go to `default`. |
+| `enableDefaultPort` | `false` | Exposes a `default` source port for low-confidence routes. |
+| `enableErrorPort` | `false` | Routes LLM/API errors to an `error` source port instead of failing. |
+| `timeoutSeconds` | `30` | Per-request HTTP timeout. |
+
+API key is supplied per-message via `Request.apiKey` (same pattern as `llm_complete`).
+
+Decision metadata lands on the trace span via these attributes:
+- `llm_router.chosen` — picked route name
+- `llm_router.confidence` — 0-1
+- `llm_router.reasoning` — one sentence
+- `llm_router.input_tokens` / `llm_router.output_tokens`
 
 ## Settings
 
