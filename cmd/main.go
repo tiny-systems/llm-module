@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 	_ "github.com/tiny-systems/llm-module/components/llmcomplete"
 	_ "github.com/tiny-systems/llm-module/components/llmrouter"
+	_ "github.com/tiny-systems/llm-module/components/llmtools"
 	"github.com/tiny-systems/module/cli"
 )
 

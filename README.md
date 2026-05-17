@@ -8,6 +8,7 @@ LLM components for Tiny Systems flows — completion and agentic routing.
 |---|---|
 | `llm_complete` | Single-turn completion via the Anthropic Messages API. Supports prompt caching on the system prompt. Emits `text`, `model`, `stopReason`, and detailed `usage` (input/output/cache_read/cache_creation tokens). |
 | `llm_router` | Route a message to one of N output ports based on LLM judgement. Configure routes as `{name, description}` pairs; each becomes an `out_<name>` source port. Emits Context-only (same shape as deterministic router). Decision metadata (chosen route, confidence, reasoning, token usage) lands on the trace span as attributes. |
+| `llm_tools` | ReAct / function-calling primitive. Declare tools as `{name, description, inputSchema}` triples; each becomes an `out_<name>` source port that fires when the model picks that tool. Emits the structured tool args + the updated message history so the caller can wire a tool handler back into another `llm_tools.request` call with an appended `tool_result`. If the model produces a final text response instead, the `response` port fires with the text and final history. Stateless — caller maintains the conversation across iterations. |
 
 ## `llm_router`
 
