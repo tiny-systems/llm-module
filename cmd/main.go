@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	_ "github.com/tiny-systems/llm-module/components/llmchat"
 	_ "github.com/tiny-systems/llm-module/components/llmcomplete"
 	_ "github.com/tiny-systems/llm-module/components/llmrouter"
 	_ "github.com/tiny-systems/llm-module/components/llmtools"
