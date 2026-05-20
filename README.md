@@ -6,10 +6,10 @@ LLM components for Tiny Systems flows — completion and agentic routing.
 
 | Name | Purpose |
 |---|---|
-| `llm_complete` | Single-turn completion via the Anthropic Messages API. Supports prompt caching on the system prompt. Emits `text`, `model`, `stopReason`, and detailed `usage` (input/output/cache_read/cache_creation tokens). |
+| `llm_complete` | Single-turn completion via Anthropic Messages API (default) or OpenAI Chat Completions (and any OpenAI-compatible endpoint — Ollama, vLLM, OpenRouter, Azure OpenAI). Supports prompt caching on Anthropic. Emits `text`, `model`, `stopReason`, and detailed `usage`. |
 | `llm_router` | Route a message to one of N output ports based on LLM judgement. Configure routes as `{name, description}` pairs; each becomes an `out_<name>` source port. Emits Context-only (same shape as deterministic router). Decision metadata (chosen route, confidence, reasoning, token usage) lands on the trace span as attributes. |
 | `llm_tools` | ReAct / function-calling primitive. Declare tools as `{name, description, inputSchema}` triples; each becomes an `out_<name>` source port that fires when the model picks that tool. Emits the structured tool args + the updated message history so the caller can wire a tool handler back into another `llm_tools.request` call with an appended `tool_result`. If the model produces a final text response instead, the `response` port fires with the text and final history. Stateless — caller maintains the conversation across iterations. |
-| `llm_chat` | Stateless multi-turn conversation. Caller supplies the full `messages` history per call; component emits the updated history (with the assistant turn appended) plus the response text on the `response` port. Persist with `document_store` (or `kv`/`postgres_exec`) around the call: load → llm_chat → save. Use for pure conversation; use `llm_tools` when the agent needs to call tools. |
+| `llm_chat` | Stateless multi-turn conversation, Anthropic or OpenAI-compatible. Caller supplies the full `messages` history per call; component emits the updated history (with the assistant turn appended) plus the response text on the `response` port. Persist with `document_store` (or `kv`/`postgres_exec`) around the call: load → llm_chat → save. Use for pure conversation; use `llm_tools` when the agent needs to call tools. |
 
 ## `llm_router`
 
@@ -33,18 +33,40 @@ Decision metadata lands on the trace span via these attributes:
 - `llm_router.reasoning` — one sentence
 - `llm_router.input_tokens` / `llm_router.output_tokens`
 
-## Settings
+## Settings (`llm_complete`, `llm_chat`)
 
 | Field | Default | Notes |
 |---|---|---|
-| `model` | `claude-haiku-4-5` | Any Anthropic model id (Haiku/Sonnet/Opus). |
+| `provider` | `anthropic` | `anthropic` or `openai`. Determines wire format, auth header, and which provider defaults apply. |
+| `baseURL` | *(empty)* | Optional override. For `openai`-compatible servers pass the v1 base (e.g. `http://ollama:11434/v1` or `https://openrouter.ai/api/v1`). Leave blank for the provider default. |
+| `model` | `claude-haiku-4-5` | Provider-specific model id. Anthropic: `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`. OpenAI: `gpt-4o-mini`, `gpt-4o`. Ollama: whatever you have pulled (`llama3.1`, `qwen2.5`, …). |
 | `systemPrompt` | *(empty)* | Sent as system role on every call. |
-| `cacheSystem` | `false` | Mark the system prompt as `ephemeral`. Lets identical subsequent calls hit Anthropic's prompt cache. |
+| `cacheSystem` | `false` | Anthropic only. Mark the system prompt as `ephemeral` so identical subsequent calls hit the prompt cache. Ignored on `openai`. |
 | `maxTokens` | `1024` | Output token cap. |
 | `temperature` | `0` | Set higher for sampling diversity. |
 | `timeoutSeconds` | `60` | Per-request HTTP timeout. |
 
-The API key flows in via the input message (`apiKey`), not via component settings — same context-passthrough pattern other Tiny Systems modules use for credentials.
+The API key flows in via the input message (`apiKey`), not via component settings — same context-passthrough pattern other Tiny Systems modules use for credentials. The same field carries Anthropic `x-api-key` or OpenAI `Bearer` tokens depending on `provider`.
+
+### Switching providers
+
+The output shape (`text`, `model`, `stopReason`, `usage`) is identical across providers, so downstream edges don't have to change when you flip `provider`. Differences:
+
+- **Auth**: Anthropic sends `x-api-key` + `anthropic-version`; OpenAI sends `Authorization: Bearer …`.
+- **Prompt caching**: Anthropic-only via `cacheSystem`; OpenAI ignores the field.
+- **Usage**: `cacheRead` / `cacheCreation` are zero outside Anthropic.
+- **Tool use**: `llm_tools` is Anthropic-native and not portable; use `llm_complete` / `llm_chat` for the multi-provider path.
+
+### Self-hosted via Ollama
+
+```
+provider: openai
+baseURL:  http://ollama.ollama.svc.cluster.local:11434/v1
+model:    llama3.1
+apiKey:   any-non-empty-string
+```
+
+Ollama exposes an OpenAI-compatible `/v1/chat/completions` endpoint, so the `openai` provider works against it directly. The `apiKey` is still required by the request shape but Ollama doesn't validate it — pass `ollama` or similar.
 
 ## Retryable errors
 
