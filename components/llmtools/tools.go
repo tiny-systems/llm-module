@@ -1,28 +1,32 @@
 // Package llmtools implements llm_tools — the keystone for
-// ReAct / function-calling agents. It exposes Anthropic's tool_use
-// content blocks as N dynamic output ports, one per declared tool.
-// Per call, the model either picks a tool (emitting structured args
-// on out_<toolname>) or produces a final text response (emitting on
-// the `response` port).
+// ReAct / function-calling agents. It exposes the configured LLM
+// provider's tool-calling API as N dynamic output ports, one per
+// declared tool. Per call, the model either picks a tool (emitting
+// structured args on out_<toolname>) or produces a final text response
+// (emitting on the `response` port).
 //
-// The component itself is stateless: each invocation is one
-// Anthropic call. The caller supplies the full `messages` history,
-// and when a tool is picked the component emits the UPDATED messages
-// (including the assistant's tool_use block) so the next invocation
-// can append a tool_result and continue. This is how ReAct loops are
-// built: tool → handler → next llm_tools call with appended result.
+// Multi-provider since v0.8.0: Anthropic (Messages API tool_use) and
+// OpenAI Chat Completions (function calling) share a normalized message
+// shape so flows compose the same way regardless of backend. The wire
+// shape (tool_use blocks vs tool_calls arrays) is hidden in the
+// internal provider package.
+//
+// The component itself is stateless: each invocation is one API call.
+// The caller supplies the full Messages history. When a tool is picked
+// the component emits the UPDATED messages (including the assistant
+// turn with that tool_use) so the next invocation can append the tool
+// result and continue. This is how ReAct loops are built: tool →
+// handler → next llm_tools call with appended tool result.
 package llmtools
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
+	"github.com/tiny-systems/llm-module/internal/provider"
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
@@ -34,22 +38,23 @@ const (
 	RequestPort      = "request"
 	ResponsePort     = "response"
 	ErrorPort        = "error"
-	anthropicURL     = "https://api.anthropic.com/v1/messages"
-	anthropicVersion = "2023-06-01"
 	defaultModel     = "claude-haiku-4-5"
 	defaultMaxTokens = 1024
 	defaultTimeout   = 60 * time.Second
 
 	outPortPrefix = "out_"
+
+	RoleUser      = "user"
+	RoleAssistant = "assistant"
+	RoleTool      = "tool"
 )
 
 type Context any
 
-// Tool declares one function the model can call. Mirrors Anthropic's
-// tool spec: name + description (the model reads both to decide when
-// to invoke), plus an input schema constraining the structured args
-// the model emits. inputSchema is a JSON Schema fragment — pass
-// `{type: object, properties: {...}, required: [...]}` shape.
+// Tool declares one function the model can call. Mirrors both
+// Anthropic's tool spec (name + description + input_schema) and
+// OpenAI's function spec (name + description + parameters) — the
+// provider translates as needed.
 type Tool struct {
 	Name        string         `json:"name" required:"true" minLength:"1" title:"Name" description:"Becomes output port out_<lowercase(name)>. Used by the model to identify the tool."`
 	Description string         `json:"description" required:"true" minLength:"1" title:"Description" description:"Tells the model what the tool does and when to use it. Be specific."`
@@ -58,41 +63,55 @@ type Tool struct {
 
 type Settings struct {
 	EnableErrorPort bool    `json:"enableErrorPort" required:"true" title:"Enable Error Port"`
+	Provider        string  `json:"provider" required:"true" enum:"anthropic,openai" default:"anthropic" title:"Provider" description:"LLM backend. 'anthropic' uses the Messages API tool_use protocol. 'openai' uses Chat Completions function calling and also targets any OpenAI-compatible endpoint via BaseURL."`
+	BaseURL         string  `json:"baseURL" title:"Base URL" description:"Optional override for self-hosted or third-party endpoints. For openai-compatible servers, pass the v1 base (e.g. http://ollama:11434/v1). Leave blank for the provider default."`
 	Tools           []Tool  `json:"tools" required:"true" minItems:"1" uniqueItems:"true" title:"Tools" description:"Tools the model may invoke. At least one."`
 	Model           string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model"`
-	SystemPrompt    string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Frames the model's behavior across all turns."`
-	CacheSystem     bool    `json:"cacheSystem" title:"Cache System Prompt" description:"Mark the system prompt as ephemeral so subsequent identical calls hit the prompt cache."`
+	SystemPrompt    string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Frames the model's behaviour across all turns."`
+	CacheSystem     bool    `json:"cacheSystem" title:"Cache System Prompt" description:"Anthropic only — mark the system prompt as ephemeral so subsequent identical calls hit the prompt cache. Ignored on openai."`
 	MaxTokens       int     `json:"maxTokens" required:"true" minimum:"1" default:"1024" title:"Max Tokens"`
 	Temperature     float64 `json:"temperature" minimum:"0" maximum:"1" title:"Temperature"`
 	TimeoutSeconds  int     `json:"timeoutSeconds" minimum:"1" default:"60" title:"Timeout Seconds"`
 }
 
-// Message is one turn in the conversation. Content can be a plain
-// string (user/assistant text) OR a list of content blocks for
-// tool_use and tool_result interactions. The caller is responsible
-// for building messages — typically:
-//   - first call: [{role: user, content: "<question>"}]
-//   - after a tool_use: previous messages + [{role: user, content: [{type: tool_result, tool_use_id, content}]}]
+// MessageToolUse is one tool invocation the model emitted in an
+// assistant turn. The pair (id, name) is what the next tool message
+// references via toolCallId.
+type MessageToolUse struct {
+	ID    string `json:"id" title:"Id" description:"Opaque id the provider assigned. Round-trip unchanged."`
+	Name  string `json:"name" title:"Name"`
+	Input any    `json:"input" title:"Input" description:"Structured args per the tool's inputSchema."`
+}
+
+// Message is provider-agnostic. Three roles:
+//
+//   - user:      Content holds the user prompt.
+//   - assistant: Content holds the model's reply text (may be empty);
+//     ToolUses lists any tool invocations the model made.
+//   - tool:      ToolCallId names which assistant ToolUses entry this
+//     answers; Content holds the tool output as a string.
 type Message struct {
-	Role    string `json:"role" title:"Role" description:"'user' or 'assistant'"`
-	Content any    `json:"content" title:"Content" description:"String for plain text, or list of content blocks for tool_use/tool_result."`
+	Role       string           `json:"role" title:"Role" description:"'user' | 'assistant' | 'tool'"`
+	Content    string           `json:"content,omitempty" title:"Content" description:"Plain text. For 'tool' role, the stringified tool output."`
+	ToolUses   []MessageToolUse `json:"toolUses,omitempty" title:"Tool Uses" description:"Assistant turn only — tool invocations the model made."`
+	ToolCallID string           `json:"toolCallId,omitempty" title:"Tool Call Id" description:"'tool' role only — which ToolUses entry this is a result for."`
 }
 
 type Request struct {
 	Context  Context   `json:"context,omitempty" configurable:"true" title:"Context" description:"Passthrough emitted on whichever output port fires."`
-	APIKey   string    `json:"apiKey" required:"true" minLength:"1" title:"Anthropic API Key" format:"password"`
-	Messages []Message `json:"messages" required:"true" minItems:"1" title:"Messages" description:"Full conversation history sent to Claude."`
+	APIKey   string    `json:"apiKey" required:"true" minLength:"1" title:"API Key" format:"password" description:"Anthropic x-api-key or OpenAI Bearer token, depending on Provider."`
+	Messages []Message `json:"messages" required:"true" minItems:"1" title:"Messages" description:"Full conversation history. Build incrementally: append the prior llm_tools response's Messages, then a {role: tool, toolCallId, content} entry for each tool result, then re-invoke."`
 }
 
 // ToolCall is the payload emitted on a tool's out_<name> port. The
-// caller routes this to the matching handler, then feeds the
-// handler's output back via a new llm_tools.request call with
-// messages updated to include the tool_result.
+// caller routes this to the matching handler, then sends the result
+// back via a new llm_tools.request call with a {role:tool, ...} entry
+// appended to Messages.
 type ToolCall struct {
-	Context   Context   `json:"context"`
-	Messages  []Message `json:"messages" description:"Updated history including the model's tool_use response. Append a tool_result and re-call to continue."`
-	ToolUseID string    `json:"toolUseId" description:"Anthropic's id for this tool call. Required when building the tool_result for the next turn."`
-	Input     any       `json:"input" description:"Structured arguments per the tool's inputSchema."`
+	Context   Context   `json:"context,omitempty" configurable:"true" title:"Context"`
+	Messages  []Message `json:"messages" title:"Messages" description:"Updated history including the assistant turn that called this tool. Append a {role: tool, toolCallId: '<id>', content: '<output>'} and re-call to continue."`
+	ToolUseID string    `json:"toolUseId" title:"Tool Use Id" description:"Use this as toolCallId on the next-turn tool message."`
+	Input     any       `json:"input" title:"Input" description:"Structured arguments per the tool's inputSchema."`
 }
 
 type Usage struct {
@@ -103,17 +122,17 @@ type Usage struct {
 }
 
 type Response struct {
-	Context  Context   `json:"context"`
-	Text     string    `json:"text"`
-	Messages []Message `json:"messages" description:"Final history including the assistant's text reply. Use as a starting point for future conversation turns."`
+	Context  Context   `json:"context,omitempty" configurable:"true" title:"Context"`
+	Text     string    `json:"text" title:"Text"`
+	Messages []Message `json:"messages" title:"Messages" description:"Final history including the assistant's text reply. Use as a base for a follow-up call if you want to continue the conversation."`
 	Model    string    `json:"model"`
 	Usage    Usage     `json:"usage"`
 }
 
 type Error struct {
-	Context   Context `json:"context"`
-	Error     string  `json:"error"`
-	Retryable bool    `json:"retryable"`
+	Context   Context `json:"context,omitempty" configurable:"true" title:"Context"`
+	Error     string  `json:"error" title:"Error"`
+	Retryable bool    `json:"retryable" title:"Retryable" description:"True for 429/529/5xx and network errors. Caller may retry with backoff."`
 }
 
 type Component struct {
@@ -122,6 +141,7 @@ type Component struct {
 
 func (c *Component) Instance() module.Component {
 	return &Component{settings: Settings{
+		Provider:       provider.Anthropic,
 		Model:          defaultModel,
 		MaxTokens:      defaultMaxTokens,
 		TimeoutSeconds: int(defaultTimeout / time.Second),
@@ -132,12 +152,13 @@ func (c *Component) GetInfo() module.ComponentInfo {
 	return module.ComponentInfo{
 		Name:        ComponentName,
 		Description: "LLM Tools",
-		Info: "ReAct / function-calling primitive. Declare tools in Settings; each becomes an out_<toolname> source port emitting " +
-			"{toolUseId, input, messages} when the model picks it. If the model produces a final text response instead, that fires " +
-			"on the response port. Component is stateless — caller supplies full message history. To build a ReAct loop: wire " +
-			"out_<tool> → handler → another llm_tools.request with messages updated to append a tool_result for that toolUseId. " +
-			"Loop until response port fires. API key per-request like llm_complete.",
-		Tags: []string{"LLM", "Anthropic", "Tools", "ReAct", "Agent"},
+		Info: "ReAct / function-calling primitive. Declare tools in Settings; each becomes an out_<toolname> source port " +
+			"emitting {toolUseId, input, messages} when the model picks it. Multi-provider — Anthropic Messages tool_use " +
+			"(default) or OpenAI Chat Completions function calling via Provider=openai; BaseURL targets any OpenAI-compatible " +
+			"endpoint (Ollama, vLLM, OpenRouter). Component is stateless: caller supplies the full Messages history. To build a " +
+			"ReAct loop, wire out_<tool> → handler → another llm_tools.request with the previous response's Messages plus a " +
+			"{role: tool, toolCallId, content} entry. Loop until the response port fires.",
+		Tags: []string{"LLM", "Anthropic", "OpenAI", "Tools", "ReAct", "Agent"},
 	}
 }
 
@@ -178,72 +199,6 @@ func (c *Component) Handle(ctx context.Context, handler module.Handler, port str
 	return c.invoke(ctx, handler, in)
 }
 
-// --- Anthropic API plumbing --------------------------------------
-
-type apiContentBlock struct {
-	Type         string         `json:"type"`
-	Text         string         `json:"text,omitempty"`
-	ID           string         `json:"id,omitempty"`
-	Name         string         `json:"name,omitempty"`
-	Input        any            `json:"input,omitempty"`
-	ToolUseID    string         `json:"tool_use_id,omitempty"`
-	Content      any            `json:"content,omitempty"`
-	CacheControl *cacheControl  `json:"cache_control,omitempty"`
-}
-
-type cacheControl struct {
-	Type string `json:"type"`
-}
-
-type apiMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"` // string or []apiContentBlock
-}
-
-type apiToolDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"input_schema"`
-}
-
-type apiSystemBlock struct {
-	Type         string        `json:"type"`
-	Text         string        `json:"text"`
-	CacheControl *cacheControl `json:"cache_control,omitempty"`
-}
-
-type apiRequest struct {
-	Model       string           `json:"model"`
-	MaxTokens   int              `json:"max_tokens"`
-	Temperature float64          `json:"temperature,omitempty"`
-	System      []apiSystemBlock `json:"system,omitempty"`
-	Messages    []apiMessage     `json:"messages"`
-	Tools       []apiToolDef     `json:"tools,omitempty"`
-}
-
-type apiResponseUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-}
-
-type apiResponse struct {
-	Model      string            `json:"model"`
-	Content    []apiContentBlock `json:"content"`
-	StopReason string            `json:"stop_reason"`
-	Usage      apiResponseUsage  `json:"usage"`
-}
-
-type apiError struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-}
-
-type apiErrorResponse struct {
-	Error apiError `json:"error"`
-}
-
 func (c *Component) invoke(ctx context.Context, handler module.Handler, in Request) module.Result {
 	timeout := time.Duration(c.settings.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
@@ -254,145 +209,110 @@ func (c *Component) invoke(ctx context.Context, handler module.Handler, in Reque
 		model = defaultModel
 	}
 
-	body := apiRequest{
-		Model:       model,
-		MaxTokens:   c.settings.MaxTokens,
-		Temperature: c.settings.Temperature,
-		Messages:    messagesToAPI(in.Messages),
-		Tools:       toolsToAPI(c.settings.Tools),
-	}
-	if c.settings.SystemPrompt != "" {
-		block := apiSystemBlock{Type: "text", Text: c.settings.SystemPrompt}
-		if c.settings.CacheSystem {
-			block.CacheControl = &cacheControl{Type: "ephemeral"}
-		}
-		body.System = []apiSystemBlock{block}
-	}
-
-	payload, err := json.Marshal(body)
+	p, err := provider.New(c.settings.Provider)
 	if err != nil {
 		return c.fail(ctx, handler, in.Context, err, false)
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, anthropicURL, bytes.NewReader(payload))
+	resp, err := p.CompleteWithTools(ctx, provider.ToolCompletionRequest{
+		APIKey:       in.APIKey,
+		BaseURL:      c.settings.BaseURL,
+		Model:        model,
+		SystemPrompt: c.settings.SystemPrompt,
+		CacheSystem:  c.settings.CacheSystem,
+		Messages:     toProviderMessages(in.Messages),
+		Tools:        toProviderTools(c.settings.Tools),
+		MaxTokens:    c.settings.MaxTokens,
+		Temperature:  c.settings.Temperature,
+		Timeout:      timeout,
+	})
 	if err != nil {
-		return c.fail(ctx, handler, in.Context, err, false)
-	}
-	httpReq.Header.Set("content-type", "application/json")
-	httpReq.Header.Set("x-api-key", in.APIKey)
-	httpReq.Header.Set("anthropic-version", anthropicVersion)
-
-	resp, err := (&http.Client{}).Do(httpReq)
-	if err != nil {
-		return c.fail(ctx, handler, in.Context, err, true)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return c.fail(ctx, handler, in.Context, err, false)
-	}
-
-	if resp.StatusCode >= 400 {
-		retryable := resp.StatusCode == http.StatusTooManyRequests ||
-			resp.StatusCode == 529 || resp.StatusCode >= 500
-		var apiErr apiErrorResponse
-		if jsonErr := json.Unmarshal(respBody, &apiErr); jsonErr == nil && apiErr.Error.Message != "" {
-			return c.fail(ctx, handler, in.Context,
-				fmt.Errorf("%s: %s", apiErr.Error.Type, apiErr.Error.Message), retryable)
+		var perr *provider.Error
+		if errors.As(err, &perr) {
+			return c.fail(ctx, handler, in.Context, perr.Err, perr.Retryable)
 		}
-		return c.fail(ctx, handler, in.Context,
-			fmt.Errorf("anthropic api: status %d: %s", resp.StatusCode, string(respBody)), retryable)
-	}
-
-	var parsed apiResponse
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return c.fail(ctx, handler, in.Context, fmt.Errorf("decode response: %w", err), false)
-	}
-
-	// Walk content blocks. First tool_use wins (Anthropic can return
-	// multiple in parallel; the common case is one, and we keep the
-	// surface simple by routing the first). Text-only responses go on
-	// the response port.
-	var textBuf strings.Builder
-	var toolBlock *apiContentBlock
-	for i := range parsed.Content {
-		block := &parsed.Content[i]
-		switch block.Type {
-		case "text":
-			textBuf.WriteString(block.Text)
-		case "tool_use":
-			if toolBlock == nil {
-				toolBlock = block
-			}
-		}
+		return c.fail(ctx, handler, in.Context, err, false)
 	}
 
 	usage := Usage{
-		Input:         parsed.Usage.InputTokens,
-		Output:        parsed.Usage.OutputTokens,
-		CacheRead:     parsed.Usage.CacheReadInputTokens,
-		CacheCreation: parsed.Usage.CacheCreationInputTokens,
+		Input:         resp.Usage.Input,
+		Output:        resp.Usage.Output,
+		CacheRead:     resp.Usage.CacheRead,
+		CacheCreation: resp.Usage.CacheCreation,
 	}
 
-	if toolBlock != nil {
-		toolName := canonicalToolName(toolBlock.Name, c.settings.Tools)
-		if toolName == "" {
-			return c.fail(ctx, handler, in.Context,
-				fmt.Errorf("model picked unknown tool %q (available: %s)", toolBlock.Name, toolNames(c.settings.Tools)),
-				false)
+	if len(resp.ToolUses) > 0 {
+		// Append the assistant turn to history so the caller can build
+		// the next request by appending tool result messages.
+		assistantUses := make([]MessageToolUse, len(resp.ToolUses))
+		for i, u := range resp.ToolUses {
+			assistantUses[i] = MessageToolUse{ID: u.ID, Name: u.Name, Input: u.Input}
 		}
-		// Append the assistant's tool_use turn to history so the
-		// caller can feed it back with a tool_result for the next
-		// llm_tools call.
 		updated := append([]Message(nil), in.Messages...)
 		updated = append(updated, Message{
-			Role:    "assistant",
-			Content: parsed.Content, // include text + tool_use blocks verbatim
+			Role:     RoleAssistant,
+			Content:  resp.Text,
+			ToolUses: assistantUses,
 		})
+
+		// Route the first tool_use to out_<name>. If the model called
+		// multiple tools in parallel, the others are surfaced via the
+		// updated Messages — the caller can fan out by inspecting
+		// ToolUses on the assistant turn. Routing the first keeps the
+		// single-port contract intact for the common case.
+		first := resp.ToolUses[0]
+		toolName := canonicalToolName(first.Name, c.settings.Tools)
+		if toolName == "" {
+			return c.fail(ctx, handler, in.Context,
+				fmt.Errorf("model picked unknown tool %q (available: %s)", first.Name, toolNames(c.settings.Tools)),
+				false)
+		}
 		return handler(ctx, outPortFor(toolName), ToolCall{
 			Context:   in.Context,
 			Messages:  updated,
-			ToolUseID: toolBlock.ID,
-			Input:     toolBlock.Input,
+			ToolUseID: first.ID,
+			Input:     first.Input,
 		})
 	}
 
-	// No tool picked — model produced final text. Return it plus
-	// updated history so the caller can keep chatting in the next turn.
+	// No tool picked — final text reply.
 	updated := append([]Message(nil), in.Messages...)
 	updated = append(updated, Message{
-		Role:    "assistant",
-		Content: textBuf.String(),
+		Role:    RoleAssistant,
+		Content: resp.Text,
 	})
 	return handler(ctx, ResponsePort, Response{
 		Context:  in.Context,
-		Text:     textBuf.String(),
+		Text:     resp.Text,
 		Messages: updated,
-		Model:    parsed.Model,
+		Model:    resp.Model,
 		Usage:    usage,
 	})
 }
 
-// messagesToAPI converts the caller's Message slice into the
-// Anthropic API shape. We pass Content through unchanged — Anthropic
-// accepts both string content and arrays of content blocks, which
-// matches what callers send during ReAct loops.
-func messagesToAPI(msgs []Message) []apiMessage {
-	out := make([]apiMessage, len(msgs))
+func toProviderMessages(msgs []Message) []provider.ToolMessage {
+	out := make([]provider.ToolMessage, len(msgs))
 	for i, m := range msgs {
-		out[i] = apiMessage{Role: m.Role, Content: m.Content}
+		out[i] = provider.ToolMessage{
+			Role:       m.Role,
+			Text:       m.Content,
+			ToolCallID: m.ToolCallID,
+		}
+		if len(m.ToolUses) > 0 {
+			uses := make([]provider.ToolUse, len(m.ToolUses))
+			for j, u := range m.ToolUses {
+				uses[j] = provider.ToolUse{ID: u.ID, Name: u.Name, Input: u.Input}
+			}
+			out[i].ToolUses = uses
+		}
 	}
 	return out
 }
 
-func toolsToAPI(tools []Tool) []apiToolDef {
-	out := make([]apiToolDef, len(tools))
+func toProviderTools(tools []Tool) []provider.ToolDef {
+	out := make([]provider.ToolDef, len(tools))
 	for i, t := range tools {
-		out[i] = apiToolDef{
+		out[i] = provider.ToolDef{
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: t.InputSchema,
