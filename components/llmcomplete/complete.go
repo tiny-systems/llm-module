@@ -1,14 +1,21 @@
+// Package llmcomplete implements llm_complete — a single-turn
+// completion primitive that targets a configurable LLM provider.
+//
+// Defaults to Anthropic's Messages API with prompt-cache support on
+// the system prompt. Set Settings.Provider="openai" to target the
+// OpenAI Chat Completions API (or any OpenAI-compatible endpoint via
+// Settings.BaseURL — Ollama, vLLM, OpenRouter, Together, Azure
+// OpenAI, etc.). The output shape stays the same regardless of
+// provider so downstream edges don't need to know which backend ran.
 package llmcomplete
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
 
+	"github.com/tiny-systems/llm-module/internal/provider"
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
@@ -20,8 +27,6 @@ const (
 	RequestPort      = "request"
 	ResponsePort     = "response"
 	ErrorPort        = "error"
-	anthropicURL     = "https://api.anthropic.com/v1/messages"
-	anthropicVersion = "2023-06-01"
 	defaultModel     = "claude-haiku-4-5"
 	defaultMaxTokens = 1024
 	defaultTimeout   = 60 * time.Second
@@ -31,17 +36,19 @@ type Context any
 
 type Settings struct {
 	EnableErrorPort bool    `json:"enableErrorPort" required:"true" title:"Enable Error Port"`
-	Model           string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model" description:"Anthropic model ID (e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7)"`
-	SystemPrompt    string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Sent as the system role on every request"`
-	CacheSystem     bool    `json:"cacheSystem" title:"Cache System Prompt" description:"Mark the system prompt as ephemeral so subsequent identical calls hit the prompt cache"`
-	MaxTokens       int     `json:"maxTokens" required:"true" minimum:"1" default:"1024" title:"Max Tokens" description:"Maximum output tokens"`
+	Provider        string  `json:"provider" required:"true" enum:"anthropic,openai" default:"anthropic" title:"Provider" description:"LLM backend. 'anthropic' uses the Messages API and supports prompt caching on the system prompt. 'openai' uses the Chat Completions API and also works with any OpenAI-compatible endpoint (Ollama, vLLM, OpenRouter, Azure OpenAI, Together) via BaseURL."`
+	BaseURL         string  `json:"baseURL" title:"Base URL" description:"Optional override for self-hosted or third-party endpoints. For openai-compatible servers, pass the v1 base (e.g. http://ollama:11434/v1). Leave blank for the provider default."`
+	Model           string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model" description:"Provider model ID (claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7 for anthropic; gpt-4o-mini, gpt-4o for openai; llama3.1 etc. for ollama)."`
+	SystemPrompt    string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Sent as the system role on every request."`
+	CacheSystem     bool    `json:"cacheSystem" title:"Cache System Prompt" description:"Anthropic only: mark the system prompt as ephemeral so subsequent identical calls hit the prompt cache. Ignored on openai."`
+	MaxTokens       int     `json:"maxTokens" required:"true" minimum:"1" default:"1024" title:"Max Tokens" description:"Maximum output tokens."`
 	Temperature     float64 `json:"temperature" minimum:"0" maximum:"1" title:"Temperature"`
 	TimeoutSeconds  int     `json:"timeoutSeconds" minimum:"1" default:"60" title:"Timeout Seconds"`
 }
 
 type Request struct {
 	Context     Context `json:"context,omitempty" configurable:"true" title:"Context"`
-	APIKey      string  `json:"apiKey" required:"true" minLength:"1" title:"Anthropic API Key" format:"password"`
+	APIKey      string  `json:"apiKey" required:"true" minLength:"1" title:"API Key" format:"password" description:"Anthropic x-api-key or OpenAI Bearer token, depending on the configured Provider."`
 	UserMessage string  `json:"userMessage" required:"true" minLength:"1" title:"User Message" format:"textarea"`
 }
 
@@ -63,7 +70,7 @@ type Response struct {
 type Error struct {
 	Context   Context `json:"context,omitempty" configurable:"true" title:"Context"`
 	Error     string  `json:"error" title:"Error"`
-	Retryable bool    `json:"retryable" title:"Retryable" description:"True for 429 (rate limit) or 529 (overloaded). Caller may retry with backoff."`
+	Retryable bool    `json:"retryable" title:"Retryable" description:"True for 429 (rate limit), 529 (overloaded), 5xx, or network errors. Caller may retry with backoff."`
 }
 
 type Component struct {
@@ -73,6 +80,7 @@ type Component struct {
 func (c *Component) Instance() module.Component {
 	return &Component{
 		settings: Settings{
+			Provider:       provider.Anthropic,
 			Model:          defaultModel,
 			MaxTokens:      defaultMaxTokens,
 			TimeoutSeconds: int(defaultTimeout / time.Second),
@@ -84,14 +92,12 @@ func (c *Component) GetInfo() module.ComponentInfo {
 	return module.ComponentInfo{
 		Name:        ComponentName,
 		Description: "LLM Complete",
-		Info:        "Single-turn completion via the Anthropic Messages API. Supports prompt caching on the system prompt for cost-efficient repeated calls. Emits text, model, usage, and stop reason on success; routes 429/529 errors with retryable=true so upstream can decide whether to retry.",
-		Tags:        []string{"LLM", "Anthropic", "Claude"},
+		Info:        "Single-turn completion. Defaults to Anthropic's Messages API (with prompt caching on the system prompt); switch Provider to 'openai' for OpenAI Chat Completions or any OpenAI-compatible endpoint (Ollama, vLLM, OpenRouter, Azure OpenAI) via BaseURL. Emits text, model, usage, and stop reason on success; routes 429/529/5xx errors with retryable=true so upstream can decide whether to retry.",
+		Tags:        []string{"LLM", "Anthropic", "OpenAI", "Claude"},
 	}
 }
 
-// OnSettings stores the component settings.
 func (c *Component) OnSettings(_ context.Context, msg any) error {
-
 	in, ok := msg.(Settings)
 	if !ok {
 		return fmt.Errorf("invalid settings")
@@ -100,7 +106,6 @@ func (c *Component) OnSettings(_ context.Context, msg any) error {
 	return nil
 }
 
-// Handle dispatches the RequestPort. System ports go through capabilities.
 func (c *Component) Handle(ctx context.Context, handler module.Handler, port string, msg any) module.Result {
 	if port != RequestPort {
 		return module.Fail(fmt.Errorf("unknown port: %s", port))
@@ -111,58 +116,6 @@ func (c *Component) Handle(ctx context.Context, handler module.Handler, port str
 		return module.Fail(fmt.Errorf("invalid request"))
 	}
 	return c.complete(ctx, handler, in)
-}
-
-type apiTextBlock struct {
-	Type         string         `json:"type"`
-	Text         string         `json:"text"`
-	CacheControl *cacheControl  `json:"cache_control,omitempty"`
-}
-
-type cacheControl struct {
-	Type string `json:"type"`
-}
-
-type apiMessage struct {
-	Role    string         `json:"role"`
-	Content []apiTextBlock `json:"content"`
-}
-
-type apiRequest struct {
-	Model       string         `json:"model"`
-	MaxTokens   int            `json:"max_tokens"`
-	Temperature float64        `json:"temperature,omitempty"`
-	System      []apiTextBlock `json:"system,omitempty"`
-	Messages    []apiMessage   `json:"messages"`
-}
-
-type apiResponseUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-}
-
-type apiResponseContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type apiResponse struct {
-	Model      string               `json:"model"`
-	Content    []apiResponseContent `json:"content"`
-	StopReason string               `json:"stop_reason"`
-	Usage      apiResponseUsage     `json:"usage"`
-}
-
-type apiError struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-}
-
-type apiErrorResponse struct {
-	Type  string   `json:"type"`
-	Error apiError `json:"error"`
 }
 
 func (c *Component) complete(ctx context.Context, handler module.Handler, in Request) module.Result {
@@ -179,99 +132,47 @@ func (c *Component) complete(ctx context.Context, handler module.Handler, in Req
 		timeout = defaultTimeout
 	}
 
-	body := apiRequest{
-		Model:       model,
+	p, err := provider.New(c.settings.Provider)
+	if err != nil {
+		return c.fail(ctx, handler, in.Context, err, false)
+	}
+
+	resp, err := p.Complete(ctx, provider.CompletionRequest{
+		APIKey:       in.APIKey,
+		BaseURL:      c.settings.BaseURL,
+		Model:        model,
+		SystemPrompt: c.settings.SystemPrompt,
+		CacheSystem:  c.settings.CacheSystem,
+		Messages: []provider.Message{
+			{Role: "user", Content: in.UserMessage},
+		},
 		MaxTokens:   maxTokens,
 		Temperature: c.settings.Temperature,
-		Messages: []apiMessage{
-			{Role: "user", Content: []apiTextBlock{{Type: "text", Text: in.UserMessage}}},
-		},
-	}
-	if c.settings.SystemPrompt != "" {
-		block := apiTextBlock{Type: "text", Text: c.settings.SystemPrompt}
-		if c.settings.CacheSystem {
-			block.CacheControl = &cacheControl{Type: "ephemeral"}
+		Timeout:     timeout,
+	})
+	if err != nil {
+		var perr *provider.Error
+		if errors.As(err, &perr) {
+			return c.fail(ctx, handler, in.Context, perr.Err, perr.Retryable)
 		}
-		body.System = []apiTextBlock{block}
-	}
-
-	payload, err := json.Marshal(body)
-	if err != nil {
 		return c.fail(ctx, handler, in.Context, err, false)
-	}
-
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, anthropicURL, bytes.NewReader(payload))
-	if err != nil {
-		return c.fail(ctx, handler, in.Context, err, false)
-	}
-	httpReq.Header.Set("content-type", "application/json")
-	httpReq.Header.Set("x-api-key", in.APIKey)
-	httpReq.Header.Set("anthropic-version", anthropicVersion)
-
-	resp, err := (&http.Client{}).Do(httpReq)
-	if err != nil {
-		return c.fail(ctx, handler, in.Context, err, isRetryableNetwork(err))
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return c.fail(ctx, handler, in.Context, err, false)
-	}
-
-	if resp.StatusCode >= 400 {
-		var apiErr apiErrorResponse
-		if jsonErr := json.Unmarshal(respBody, &apiErr); jsonErr == nil && apiErr.Error.Message != "" {
-			return c.fail(ctx, handler, in.Context, fmt.Errorf("%s: %s", apiErr.Error.Type, apiErr.Error.Message), isRetryableStatus(resp.StatusCode))
-		}
-		return c.fail(ctx, handler, in.Context, fmt.Errorf("anthropic api: status %d: %s", resp.StatusCode, string(respBody)), isRetryableStatus(resp.StatusCode))
-	}
-
-	var parsed apiResponse
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return c.fail(ctx, handler, in.Context, fmt.Errorf("decode response: %w", err), false)
-	}
-
-	text := ""
-	for _, block := range parsed.Content {
-		if block.Type == "text" {
-			text += block.Text
-		}
 	}
 
 	return handler(ctx, ResponsePort, Response{
 		Context:    in.Context,
-		Text:       text,
-		Model:      parsed.Model,
-		StopReason: parsed.StopReason,
+		Text:       resp.Text,
+		Model:      resp.Model,
+		StopReason: resp.StopReason,
 		Usage: Usage{
-			Input:         parsed.Usage.InputTokens,
-			Output:        parsed.Usage.OutputTokens,
-			CacheRead:     parsed.Usage.CacheReadInputTokens,
-			CacheCreation: parsed.Usage.CacheCreationInputTokens,
+			Input:         resp.Usage.Input,
+			Output:        resp.Usage.Output,
+			CacheRead:     resp.Usage.CacheRead,
+			CacheCreation: resp.Usage.CacheCreation,
 		},
 	})
 }
 
-func isRetryableStatus(code int) bool {
-	return code == http.StatusTooManyRequests || code == 529 || code >= 500
-}
-
-func isRetryableNetwork(err error) bool {
-	// Timeouts and transient connection errors are retryable.
-	// We don't introspect deeply; treat any network-level failure as retryable.
-	return err != nil
-}
-
 func (c *Component) fail(ctx context.Context, handler module.Handler, reqCtx Context, err error, retryable bool) module.Result {
-	// Wrap non-retryable errors as Permanent so the SDK's
-	// sendToEdgeWithRetry doesn't loop on them. Auth failures (401/403),
-	// malformed requests (400), and decode errors are not going to
-	// resolve on retry and previously burned API credits by retrying
-	// for up to 15 minutes (was infinite before SDK v0.10.15).
 	if !retryable {
 		err = perrors.NewPermanentError(err)
 	}
