@@ -30,6 +30,7 @@ import (
 
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
+	perrors "github.com/tiny-systems/module/pkg/errors"
 	"github.com/tiny-systems/module/registry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -384,6 +385,9 @@ func extractJSON(s string) string {
 }
 
 func (c *Component) fail(ctx context.Context, handler module.Handler, reqCtx Context, err error, retryable bool) module.Result {
+	if !retryable {
+		err = perrors.NewPermanentError(err)
+	}
 	if !c.settings.EnableErrorPort {
 		return module.Fail(err)
 	}

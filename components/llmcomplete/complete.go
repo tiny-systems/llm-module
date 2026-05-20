@@ -11,6 +11,7 @@ import (
 
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
+	perrors "github.com/tiny-systems/module/pkg/errors"
 	"github.com/tiny-systems/module/registry"
 )
 
@@ -266,6 +267,14 @@ func isRetryableNetwork(err error) bool {
 }
 
 func (c *Component) fail(ctx context.Context, handler module.Handler, reqCtx Context, err error, retryable bool) module.Result {
+	// Wrap non-retryable errors as Permanent so the SDK's
+	// sendToEdgeWithRetry doesn't loop on them. Auth failures (401/403),
+	// malformed requests (400), and decode errors are not going to
+	// resolve on retry and previously burned API credits by retrying
+	// for up to 15 minutes (was infinite before SDK v0.10.15).
+	if !retryable {
+		err = perrors.NewPermanentError(err)
+	}
 	if !c.settings.EnableErrorPort {
 		return module.Fail(err)
 	}
