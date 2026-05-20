@@ -30,6 +30,7 @@ import (
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
+	"github.com/tiny-systems/module/pkg/secret"
 	"github.com/tiny-systems/module/registry"
 )
 
@@ -65,6 +66,7 @@ type Settings struct {
 	EnableErrorPort bool    `json:"enableErrorPort" required:"true" title:"Enable Error Port"`
 	Provider        string  `json:"provider" required:"true" enum:"anthropic,openai" default:"anthropic" title:"Provider" description:"LLM backend. 'anthropic' uses the Messages API tool_use protocol. 'openai' uses Chat Completions function calling and also targets any OpenAI-compatible endpoint via BaseURL."`
 	BaseURL         string  `json:"baseURL" title:"Base URL" description:"Optional override for self-hosted or third-party endpoints. For openai-compatible servers, pass the v1 base (e.g. http://ollama:11434/v1). Leave blank for the provider default."`
+	APIKey          string  `json:"apiKey" title:"API Key" format:"password" description:"Preferred: set [[secret:name/key]] here so the credential is resolved against a Kubernetes Secret in the llm-module pod's namespace and never enters the flow data. Overrides Request.apiKey when set. Requires the helm release to be installed with secrets.enabled=true."`
 	Tools           []Tool  `json:"tools" required:"true" minItems:"1" uniqueItems:"true" title:"Tools" description:"Tools the model may invoke. At least one."`
 	Model           string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model"`
 	SystemPrompt    string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Frames the model's behaviour across all turns."`
@@ -99,7 +101,7 @@ type Message struct {
 
 type Request struct {
 	Context  Context   `json:"context,omitempty" configurable:"true" title:"Context" description:"Passthrough emitted on whichever output port fires."`
-	APIKey   string    `json:"apiKey" required:"true" minLength:"1" title:"API Key" format:"password" description:"Anthropic x-api-key or OpenAI Bearer token, depending on Provider."`
+	APIKey   string    `json:"apiKey,omitempty" title:"API Key" format:"password" description:"Anthropic x-api-key or OpenAI Bearer token. Leave empty when Settings.APIKey is set with a secret reference (recommended) — Settings.APIKey takes precedence."`
 	Messages []Message `json:"messages" required:"true" minItems:"1" title:"Messages" description:"Full conversation history. Build incrementally: append the prior llm_tools response's Messages, then a {role: tool, toolCallId, content} entry for each tool result, then re-invoke."`
 }
 
@@ -136,6 +138,7 @@ type Error struct {
 }
 
 type Component struct {
+	module.Base
 	settings Settings
 }
 
@@ -162,13 +165,18 @@ func (c *Component) GetInfo() module.ComponentInfo {
 	}
 }
 
-func (c *Component) OnSettings(_ context.Context, msg any) error {
+func (c *Component) OnSettings(ctx context.Context, msg any) error {
 	in, ok := msg.(Settings)
 	if !ok {
 		return fmt.Errorf("invalid settings")
 	}
 	if len(in.Tools) == 0 {
 		return fmt.Errorf("at least one tool required")
+	}
+	if client := c.Client(); client != nil {
+		if err := secret.Resolve(ctx, &in, client); err != nil {
+			return fmt.Errorf("resolve secrets: %w", err)
+		}
 	}
 	seen := map[string]bool{}
 	for i, t := range in.Tools {
@@ -214,8 +222,16 @@ func (c *Component) invoke(ctx context.Context, handler module.Handler, in Reque
 		return c.fail(ctx, handler, in.Context, err, false)
 	}
 
+	apiKey := c.settings.APIKey
+	if apiKey == "" {
+		apiKey = in.APIKey
+	}
+	if apiKey == "" {
+		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
+	}
+
 	resp, err := p.CompleteWithTools(ctx, provider.ToolCompletionRequest{
-		APIKey:       in.APIKey,
+		APIKey:       apiKey,
 		BaseURL:      c.settings.BaseURL,
 		Model:        model,
 		SystemPrompt: c.settings.SystemPrompt,
