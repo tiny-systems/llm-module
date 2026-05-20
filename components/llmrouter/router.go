@@ -31,6 +31,7 @@ import (
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
+	"github.com/tiny-systems/module/pkg/secret"
 	"github.com/tiny-systems/module/registry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -65,6 +66,7 @@ type Settings struct {
 	EnableErrorPort     bool    `json:"enableErrorPort" required:"true" title:"Enable Error Port" description:"Route LLM/API failures to error port instead of failing"`
 	EnableDefaultPort   bool    `json:"enableDefaultPort" required:"true" title:"Enable Default Port" description:"Route low-confidence / unmatched messages to a default output port. If false, the top-scoring route always wins regardless of confidence."`
 	Routes              []Route `json:"routes" required:"true" minItems:"2" uniqueItems:"true" title:"Routes" description:"Available routes for the LLM to pick from. At least two."`
+	APIKey              string  `json:"apiKey" title:"API Key" format:"password" description:"Preferred: set [[secret:name/key]] here so the Anthropic key is resolved against a Kubernetes Secret in the llm-module pod's namespace and never enters the flow data. Overrides Request.apiKey when set. Requires the helm release to be installed with secrets.enabled=true."`
 	Model               string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model" description:"Claude model. Default haiku is cheap and fast for classification."`
 	SystemPrompt        string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Optional task framing for the LLM (e.g. 'You are triaging support tickets')."`
 	ConfidenceThreshold float64 `json:"confidenceThreshold" minimum:"0" maximum:"1" default:"0" title:"Confidence Threshold" description:"Below this, route to default (if enabled). 0 disables the threshold check."`
@@ -73,7 +75,7 @@ type Settings struct {
 
 type Request struct {
 	Context Context `json:"context,omitempty" configurable:"true" title:"Context" description:"Passthrough — emitted unchanged on the chosen output port"`
-	APIKey  string  `json:"apiKey" required:"true" minLength:"1" title:"Anthropic API Key" format:"password"`
+	APIKey  string  `json:"apiKey,omitempty" title:"Anthropic API Key" format:"password" description:"Leave empty when Settings.APIKey is set with a secret reference (recommended) — Settings.APIKey takes precedence."`
 	Message string  `json:"message" required:"true" minLength:"1" title:"Message" format:"textarea" description:"Text the LLM judges to pick a route"`
 }
 
@@ -84,6 +86,7 @@ type Error struct {
 }
 
 type Component struct {
+	module.Base
 	settings Settings
 }
 
@@ -109,7 +112,7 @@ func (c *Component) GetInfo() module.ComponentInfo {
 	}
 }
 
-func (c *Component) OnSettings(_ context.Context, msg any) error {
+func (c *Component) OnSettings(ctx context.Context, msg any) error {
 	in, ok := msg.(Settings)
 	if !ok {
 		return fmt.Errorf("invalid settings")
@@ -130,6 +133,11 @@ func (c *Component) OnSettings(_ context.Context, msg any) error {
 			return fmt.Errorf("routes[%d]: duplicate name %q (case-insensitive)", i, r.Name)
 		}
 		seen[key] = true
+	}
+	if client := c.Client(); client != nil {
+		if err := secret.Resolve(ctx, &in, client); err != nil {
+			return fmt.Errorf("resolve secrets: %w", err)
+		}
 	}
 	c.settings = in
 	return nil
@@ -169,7 +177,15 @@ func (c *Component) route(ctx context.Context, handler module.Handler, in Reques
 
 	prompt := buildRouterPrompt(c.settings.SystemPrompt, c.settings.Routes, in.Message)
 
-	dec, usage, err := callClaudeForDecision(ctx, in.APIKey, model, timeout, prompt)
+	apiKey := c.settings.APIKey
+	if apiKey == "" {
+		apiKey = in.APIKey
+	}
+	if apiKey == "" {
+		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
+	}
+
+	dec, usage, err := callClaudeForDecision(ctx, apiKey, model, timeout, prompt)
 	if err != nil {
 		return c.fail(ctx, handler, in.Context, err.err, err.retryable)
 	}
