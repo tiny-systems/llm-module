@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/tiny-systems/llm-module/internal/provider"
+	"github.com/tiny-systems/llm-module/internal/stepcache"
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
@@ -150,6 +151,14 @@ func (c *Component) Handle(ctx context.Context, handler module.Handler, port str
 }
 
 func (c *Component) chat(ctx context.Context, handler module.Handler, in Request) module.Result {
+	// Durable-run replay guard: a hop re-executed after a pod death reuses
+	// the response its previous execution already paid for. Checked before
+	// provider/key validation on purpose — a replay needs no credentials.
+	if cached, ok := stepcache.Get[Response](ctx, c.State()); ok {
+		cached.Context = in.Context
+		return handler(ctx, ResponsePort, cached)
+	}
+
 	timeout := time.Duration(c.settings.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = defaultTimeout
@@ -205,8 +214,7 @@ func (c *Component) chat(ctx context.Context, handler module.Handler, in Request
 	updated := append([]Message(nil), in.Messages...)
 	updated = append(updated, Message{Role: "assistant", Content: resp.Text})
 
-	return handler(ctx, ResponsePort, Response{
-		Context:    in.Context,
+	out := Response{
 		Text:       resp.Text,
 		Messages:   updated,
 		Model:      resp.Model,
@@ -217,7 +225,13 @@ func (c *Component) chat(ctx context.Context, handler module.Handler, in Request
 			CacheRead:     resp.Usage.CacheRead,
 			CacheCreation: resp.Usage.CacheCreation,
 		},
-	})
+	}
+	// Cache WITHOUT the request context (it re-attaches on replay), the
+	// moment the paid call returns — before anything downstream can fail.
+	stepcache.Put(ctx, c.State(), out)
+	out.Context = in.Context
+
+	return handler(ctx, ResponsePort, out)
 }
 
 func (c *Component) fail(ctx context.Context, handler module.Handler, reqCtx Context, err error, retryable bool) module.Result {
