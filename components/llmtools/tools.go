@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/tiny-systems/llm-module/internal/provider"
+	"github.com/tiny-systems/llm-module/internal/stepcache"
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
@@ -208,46 +209,56 @@ func (c *Component) Handle(ctx context.Context, handler module.Handler, port str
 }
 
 func (c *Component) invoke(ctx context.Context, handler module.Handler, in Request) module.Result {
-	timeout := time.Duration(c.settings.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	model := c.settings.Model
-	if model == "" {
-		model = defaultModel
-	}
-
-	p, err := provider.New(c.settings.Provider)
-	if err != nil {
-		return c.fail(ctx, handler, in.Context, err, false)
-	}
-
-	apiKey := c.settings.APIKey
-	if apiKey == "" {
-		apiKey = in.APIKey
-	}
-	if apiKey == "" {
-		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
-	}
-
-	resp, err := p.CompleteWithTools(ctx, provider.ToolCompletionRequest{
-		APIKey:       apiKey,
-		BaseURL:      c.settings.BaseURL,
-		Model:        model,
-		SystemPrompt: c.settings.SystemPrompt,
-		CacheSystem:  c.settings.CacheSystem,
-		Messages:     toProviderMessages(in.Messages),
-		Tools:        toProviderTools(c.settings.Tools),
-		MaxTokens:    c.settings.MaxTokens,
-		Temperature:  c.settings.Temperature,
-		Timeout:      timeout,
-	})
-	if err != nil {
-		var perr *provider.Error
-		if errors.As(err, &perr) {
-			return c.fail(ctx, handler, in.Context, perr.Err, perr.Retryable)
+	// Durable-run replay guard: a hop re-executed after a pod death reuses
+	// the provider response its previous execution already paid for, then
+	// re-runs the (deterministic) tool/response dispatch below on it. Without
+	// this, a kill between the paid call and the step-ledger write re-bills.
+	resp, cached := stepcache.Get[provider.ToolCompletionResponse](ctx, c.State())
+	if !cached {
+		timeout := time.Duration(c.settings.TimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = defaultTimeout
 		}
-		return c.fail(ctx, handler, in.Context, err, false)
+		model := c.settings.Model
+		if model == "" {
+			model = defaultModel
+		}
+
+		p, err := provider.New(c.settings.Provider)
+		if err != nil {
+			return c.fail(ctx, handler, in.Context, err, false)
+		}
+
+		apiKey := c.settings.APIKey
+		if apiKey == "" {
+			apiKey = in.APIKey
+		}
+		if apiKey == "" {
+			return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
+		}
+
+		r, err := p.CompleteWithTools(ctx, provider.ToolCompletionRequest{
+			APIKey:       apiKey,
+			BaseURL:      c.settings.BaseURL,
+			Model:        model,
+			SystemPrompt: c.settings.SystemPrompt,
+			CacheSystem:  c.settings.CacheSystem,
+			Messages:     toProviderMessages(in.Messages),
+			Tools:        toProviderTools(c.settings.Tools),
+			MaxTokens:    c.settings.MaxTokens,
+			Temperature:  c.settings.Temperature,
+			Timeout:      timeout,
+		})
+		if err != nil {
+			var perr *provider.Error
+			if errors.As(err, &perr) {
+				return c.fail(ctx, handler, in.Context, perr.Err, perr.Retryable)
+			}
+			return c.fail(ctx, handler, in.Context, err, false)
+		}
+		// Cache the moment the paid call returns — before any downstream dispatch.
+		resp = *r
+		stepcache.Put(ctx, c.State(), resp)
 	}
 
 	usage := Usage{

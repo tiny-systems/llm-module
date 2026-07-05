@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tiny-systems/llm-module/internal/stepcache"
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
@@ -166,28 +167,41 @@ type decision struct {
 func (c *Component) route(ctx context.Context, handler module.Handler, in Request) module.Result {
 	span := trace.SpanFromContext(ctx)
 
-	timeout := time.Duration(c.settings.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
 	model := c.settings.Model
 	if model == "" {
 		model = defaultModel
 	}
 
-	prompt := buildRouterPrompt(c.settings.SystemPrompt, c.settings.Routes, in.Message)
+	// Durable-run replay guard: a hop re-executed after a pod death reuses
+	// the routing decision its previous execution already paid for; the port
+	// dispatch below is deterministic on it. Without this, a kill between the
+	// paid call and the step-ledger write re-bills the router's LLM call.
+	dec, cached := stepcache.Get[decision](ctx, c.State())
+	var usage usageStats
+	if !cached {
+		timeout := time.Duration(c.settings.TimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = defaultTimeout
+		}
 
-	apiKey := c.settings.APIKey
-	if apiKey == "" {
-		apiKey = in.APIKey
-	}
-	if apiKey == "" {
-		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
-	}
+		prompt := buildRouterPrompt(c.settings.SystemPrompt, c.settings.Routes, in.Message)
 
-	dec, usage, err := callClaudeForDecision(ctx, apiKey, model, timeout, prompt)
-	if err != nil {
-		return c.fail(ctx, handler, in.Context, err.err, err.retryable)
+		apiKey := c.settings.APIKey
+		if apiKey == "" {
+			apiKey = in.APIKey
+		}
+		if apiKey == "" {
+			return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
+		}
+
+		d, u, cerr := callClaudeForDecision(ctx, apiKey, model, timeout, prompt)
+		if cerr != nil {
+			return c.fail(ctx, handler, in.Context, cerr.err, cerr.retryable)
+		}
+		dec = d
+		usage = u
+		// Cache the moment the paid call returns — before any downstream dispatch.
+		stepcache.Put(ctx, c.State(), dec)
 	}
 
 	chosenName := pickValidRoute(dec.Route, c.settings.Routes)
