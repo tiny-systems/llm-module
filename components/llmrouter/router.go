@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tiny-systems/llm-module/internal/provider"
 	"github.com/tiny-systems/llm-module/internal/stepcache"
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
@@ -189,6 +190,9 @@ func (c *Component) route(ctx context.Context, handler module.Handler, in Reques
 		apiKey := c.settings.APIKey
 		if apiKey == "" {
 			apiKey = in.APIKey
+		}
+		if apiKey == "" {
+			apiKey = provider.EnvAPIKey("anthropic") // router is Anthropic-only
 		}
 		if apiKey == "" {
 			return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)

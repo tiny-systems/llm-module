@@ -234,6 +234,9 @@ func (c *Component) invoke(ctx context.Context, handler module.Handler, in Reque
 			apiKey = in.APIKey
 		}
 		if apiKey == "" {
+			apiKey = provider.EnvAPIKey(c.settings.Provider)
+		}
+		if apiKey == "" {
 			return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
 		}
 
