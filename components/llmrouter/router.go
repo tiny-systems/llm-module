@@ -68,7 +68,7 @@ type Settings struct {
 	EnableErrorPort     bool    `json:"enableErrorPort" required:"true" title:"Enable Error Port" description:"Route LLM/API failures to error port instead of failing"`
 	EnableDefaultPort   bool    `json:"enableDefaultPort" required:"true" title:"Enable Default Port" description:"Route low-confidence / unmatched messages to a default output port. If false, the top-scoring route always wins regardless of confidence."`
 	Routes              []Route `json:"routes" required:"true" minItems:"2" uniqueItems:"true" title:"Routes" description:"Available routes for the LLM to pick from. At least two."`
-	APIKey              string  `json:"apiKey" title:"API Key" format:"password" description:"Preferred: set [[secret:name/key]] here so the Anthropic key is resolved against a Kubernetes Secret in the llm-module pod's namespace and never enters the flow data. Overrides Request.apiKey when set. Requires the helm release to be installed with secrets.enabled=true."`
+	APIKey              string  `json:"apiKey" title:"API Key" format:"password" description:"API key for the provider. Overrides Request.apiKey when set. Leave EMPTY when the user supplies the key: the idiomatic shape is a masked field on the flow's trigger widget, carried here on the request edge, so nothing is provisioned per flow."`
 	Model               string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model" description:"Claude model. Default haiku is cheap and fast for classification."`
 	SystemPrompt        string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Optional task framing for the LLM (e.g. 'You are triaging support tickets')."`
 	ConfidenceThreshold float64 `json:"confidenceThreshold" minimum:"0" maximum:"1" default:"0" title:"Confidence Threshold" description:"Below this, route to default (if enabled). 0 disables the threshold check."`
@@ -195,7 +195,7 @@ func (c *Component) route(ctx context.Context, handler module.Handler, in Reques
 			apiKey = provider.EnvAPIKey("anthropic") // router is Anthropic-only
 		}
 		if apiKey == "" {
-			return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
+			return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey, or carry it per request as Request.APIKey (e.g. from the trigger widget the user fills)"), false)
 		}
 
 		d, u, cerr := callClaudeForDecision(ctx, apiKey, model, timeout, prompt)

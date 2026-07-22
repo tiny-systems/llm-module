@@ -59,7 +59,7 @@ type Settings struct {
 	EnableErrorPort bool    `json:"enableErrorPort" required:"true" title:"Enable Error Port"`
 	Provider        string  `json:"provider" required:"true" enum:"anthropic,openai" default:"anthropic" title:"Provider" description:"LLM backend. 'anthropic' uses the Messages API and supports prompt caching on the system prompt. 'openai' uses the Chat Completions API and also works with any OpenAI-compatible endpoint (Ollama, vLLM, OpenRouter, Azure OpenAI, Together) via BaseURL."`
 	BaseURL         string  `json:"baseURL" title:"Base URL" description:"Optional override for self-hosted or third-party endpoints. For openai-compatible servers, pass the v1 base (e.g. http://ollama:11434/v1). Leave blank for the provider default."`
-	APIKey          string  `json:"apiKey" title:"API Key" format:"password" description:"Preferred: set [[secret:name/key]] here so the credential is resolved against a Kubernetes Secret in the llm-module pod's namespace and never enters the flow data. Overrides Request.apiKey when set. Requires the helm release to be installed with secrets.enabled=true."`
+	APIKey          string  `json:"apiKey" title:"API Key" format:"password" description:"API key for the provider. Overrides Request.apiKey when set. Leave EMPTY when the user supplies the key: the idiomatic shape is a masked field on the flow's trigger widget, carried here on the request edge, so nothing is provisioned per flow."`
 	Model           string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model"`
 	SystemPrompt    string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Frames the assistant's role and behaviour across all turns."`
 	CacheSystem     bool    `json:"cacheSystem" title:"Cache System Prompt" description:"Anthropic only: mark the system prompt as ephemeral so identical subsequent calls hit Anthropic's prompt cache. Big win for long system prompts. Ignored on openai."`
@@ -185,7 +185,7 @@ func (c *Component) chat(ctx context.Context, handler module.Handler, in Request
 		apiKey = provider.EnvAPIKey(c.settings.Provider)
 	}
 	if apiKey == "" {
-		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey (preferred, with [[secret:...]] reference) or Request.APIKey"), false)
+		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey, or carry it per request as Request.APIKey (e.g. from the trigger widget the user fills)"), false)
 	}
 
 	pmsgs := make([]provider.Message, len(in.Messages))
