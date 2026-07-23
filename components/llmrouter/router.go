@@ -77,7 +77,7 @@ type Settings struct {
 
 type Request struct {
 	Context Context `json:"context,omitempty" configurable:"true" title:"Context" description:"Passthrough — emitted unchanged on the chosen output port"`
-	APIKey  string  `json:"apiKey,omitempty" title:"Anthropic API Key" format:"password" description:"Leave empty when Settings.APIKey is set with a secret reference (recommended) — Settings.APIKey takes precedence."`
+	APIKey  string  `json:"apiKey,omitempty" title:"Anthropic API Key" format:"password" description:"Usually left empty here and carried per-request from the trigger widget the user fills (map it onto the request edge as apiKey). Settings.APIKey takes precedence if set."`
 	Message string  `json:"message" required:"true" minLength:"1" title:"Message" format:"textarea" description:"Text the LLM judges to pick a route"`
 }
 

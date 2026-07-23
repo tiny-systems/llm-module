@@ -70,7 +70,7 @@ type Settings struct {
 
 type Request struct {
 	Context  Context   `json:"context,omitempty" configurable:"true" title:"Context" description:"Passthrough emitted on whichever output port fires."`
-	APIKey   string    `json:"apiKey,omitempty" title:"API Key" format:"password" description:"Anthropic x-api-key or OpenAI Bearer token. Leave empty when Settings.APIKey is set with a secret reference (recommended) — Settings.APIKey takes precedence."`
+	APIKey   string    `json:"apiKey,omitempty" title:"API Key" format:"password" description:"Anthropic x-api-key or OpenAI Bearer token. Usually left empty here and carried per-request from the trigger widget the user fills (map it onto the request edge as apiKey). Settings.APIKey takes precedence if set."`
 	Messages []Message `json:"messages" required:"true" minItems:"1" title:"Messages" description:"Full conversation history, ending with the new user turn. Load from your storage component before this call; save Response.messages back after."`
 }
 
