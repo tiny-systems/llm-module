@@ -27,7 +27,6 @@ import (
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
-	"github.com/tiny-systems/module/pkg/secret"
 	"github.com/tiny-systems/module/registry"
 )
 
@@ -129,11 +128,6 @@ func (c *Component) OnSettings(ctx context.Context, msg any) error {
 	in, ok := msg.(Settings)
 	if !ok {
 		return fmt.Errorf("invalid settings")
-	}
-	if client := c.Client(); client != nil {
-		if err := secret.Resolve(ctx, &in, client); err != nil {
-			return fmt.Errorf("resolve secrets: %w", err)
-		}
 	}
 	c.settings = in
 	return nil

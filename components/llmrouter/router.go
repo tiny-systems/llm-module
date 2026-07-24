@@ -33,7 +33,6 @@ import (
 	"github.com/tiny-systems/module/api/v1alpha1"
 	"github.com/tiny-systems/module/module"
 	perrors "github.com/tiny-systems/module/pkg/errors"
-	"github.com/tiny-systems/module/pkg/secret"
 	"github.com/tiny-systems/module/registry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -135,11 +134,6 @@ func (c *Component) OnSettings(ctx context.Context, msg any) error {
 			return fmt.Errorf("routes[%d]: duplicate name %q (case-insensitive)", i, r.Name)
 		}
 		seen[key] = true
-	}
-	if client := c.Client(); client != nil {
-		if err := secret.Resolve(ctx, &in, client); err != nil {
-			return fmt.Errorf("resolve secrets: %w", err)
-		}
 	}
 	c.settings = in
 	return nil
