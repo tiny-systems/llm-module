@@ -74,6 +74,8 @@ type Settings struct {
 	MaxTokens       int     `json:"maxTokens" required:"true" minimum:"1" default:"1024" title:"Max Tokens"`
 	Temperature     float64 `json:"temperature" minimum:"0" maximum:"1" title:"Temperature"`
 	TimeoutSeconds  int     `json:"timeoutSeconds" minimum:"1" default:"60" title:"Timeout Seconds"`
+
+	DisableParallelToolUse bool `json:"disableParallelToolUse" title:"One Tool Per Turn" description:"Force the model to call at most one tool per turn (Anthropic tool_choice.disable_parallel_tool_use / OpenAI parallel_tool_calls=false). Recommended for the per-tool-port ReAct loop, which appends one tool result per branch and breaks if the model requests several tools at once."`
 }
 
 // MessageToolUse is one tool invocation the model emitted in an
@@ -245,6 +247,8 @@ func (c *Component) invoke(ctx context.Context, handler module.Handler, in Reque
 			MaxTokens:    c.settings.MaxTokens,
 			Temperature:  c.settings.Temperature,
 			Timeout:      timeout,
+
+			DisableParallelToolUse: c.settings.DisableParallelToolUse,
 		})
 		if err != nil {
 			var perr *provider.Error

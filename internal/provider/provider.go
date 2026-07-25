@@ -107,6 +107,10 @@ type ToolCompletionRequest struct {
 	MaxTokens    int
 	Temperature  float64
 	Timeout      time.Duration
+	// DisableParallelToolUse forces at most one tool call per turn
+	// (Anthropic tool_choice.disable_parallel_tool_use / OpenAI
+	// parallel_tool_calls=false).
+	DisableParallelToolUse bool
 }
 
 type ToolCompletionResponse struct {

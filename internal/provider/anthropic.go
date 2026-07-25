@@ -193,6 +193,15 @@ type anthropicToolRequest struct {
 	System      []anthropicTextBlock `json:"system,omitempty"`
 	Messages    []anthropicMessage   `json:"messages"`
 	Tools       []anthropicToolDef   `json:"tools,omitempty"`
+	ToolChoice  *anthropicToolChoice `json:"tool_choice,omitempty"`
+}
+
+// anthropicToolChoice controls tool selection. Type "auto" lets the model
+// choose whether/which tool to call; DisableParallelToolUse caps it at one
+// tool call per assistant turn.
+type anthropicToolChoice struct {
+	Type                   string `json:"type"`
+	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type anthropicToolResponse struct {
@@ -214,6 +223,9 @@ func (p *anthropicProvider) CompleteWithTools(ctx context.Context, in ToolComple
 		Temperature: in.Temperature,
 		Messages:    toolMessagesToAnthropic(in.Messages),
 		Tools:       toolDefsToAnthropic(in.Tools),
+	}
+	if in.DisableParallelToolUse {
+		body.ToolChoice = &anthropicToolChoice{Type: "auto", DisableParallelToolUse: true}
 	}
 	if in.SystemPrompt != "" {
 		block := anthropicTextBlock{Type: "text", Text: in.SystemPrompt}

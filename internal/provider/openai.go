@@ -186,6 +186,9 @@ type openaiToolRequest struct {
 	Tools       []openaiToolDefWire `json:"tools,omitempty"`
 	MaxTokens   int                 `json:"max_tokens,omitempty"`
 	Temperature float64             `json:"temperature,omitempty"`
+	// Pointer so an explicit false is sent (default true). OpenAI-compatible
+	// servers that don't support the field ignore it.
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 }
 
 type openaiToolResponseMessage struct {
@@ -226,6 +229,10 @@ func (p *openaiProvider) CompleteWithTools(ctx context.Context, in ToolCompletio
 		Tools:       toolDefsToOpenAI(in.Tools),
 		MaxTokens:   in.MaxTokens,
 		Temperature: in.Temperature,
+	}
+	if in.DisableParallelToolUse {
+		no := false
+		body.ParallelToolCalls = &no
 	}
 
 	payload, err := json.Marshal(body)
