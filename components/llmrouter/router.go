@@ -80,6 +80,15 @@ type Request struct {
 	Message string  `json:"message" required:"true" minLength:"1" title:"Message" format:"textarea" description:"Text the LLM judges to pick a route"`
 }
 
+// OutMessage is what each out_<route> port emits: the passthrough Context kept
+// UNDER a `context` key, matching every other component (and this router's own
+// Request) so a downstream edge reads `$.context.<field>` — not `$.field` off a
+// bare root. Emitting the raw Context at root made router branches the one place
+// that dropped the `.context` segment (validated green, resolved null).
+type OutMessage struct {
+	Context Context `json:"context,omitempty" configurable:"true" title:"Context" description:"Passthrough — the classified message, unchanged"`
+}
+
 type Error struct {
 	Context   Context `json:"context,omitempty" configurable:"true" title:"Context"`
 	Error     string  `json:"error" title:"Error"`
@@ -224,10 +233,10 @@ func (c *Component) route(ctx context.Context, handler module.Handler, in Reques
 
 	if c.settings.EnableDefaultPort && c.settings.ConfidenceThreshold > 0 &&
 		dec.Confidence < c.settings.ConfidenceThreshold {
-		return handler(ctx, DefaultPort, in.Context)
+		return handler(ctx, DefaultPort, OutMessage{Context: in.Context})
 	}
 
-	return handler(ctx, outPortFor(chosenName), in.Context)
+	return handler(ctx, outPortFor(chosenName), OutMessage{Context: in.Context})
 }
 
 // buildRouterPrompt builds the user-message text we send to Claude.
@@ -438,7 +447,7 @@ func (c *Component) Ports() []module.Port {
 			Name:          outPortFor(r.Name),
 			Label:         r.Name,
 			Source:        true,
-			Configuration: new(Context),
+			Configuration: new(OutMessage),
 			Position:      module.Right,
 		})
 	}
@@ -447,7 +456,7 @@ func (c *Component) Ports() []module.Port {
 			Name:          DefaultPort,
 			Label:         "Default",
 			Source:        true,
-			Configuration: new(Context),
+			Configuration: new(OutMessage),
 			Position:      module.Right,
 		})
 	}
