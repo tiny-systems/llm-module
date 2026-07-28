@@ -1,0 +1,29 @@
+# Dependabot — grouped, low-noise. Deliberately NOT an ignore-list: the
+# security residuals in this graph (containerd via helm install-hooks,
+# golang.org/x/crypto via NATS nkeys) have no upstream fix, so Dependabot
+# opens no PR for them — nothing to suppress, nothing to babysit. The moment
+# a fix ships upstream, the grouped update below picks it up automatically.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
