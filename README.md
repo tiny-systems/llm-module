@@ -10,6 +10,51 @@ LLM components for Tiny Systems flows — completion and agentic routing.
 | `llm_router` | Route a message to one of N output ports based on LLM judgement. Configure routes as `{name, description}` pairs; each becomes an `out_<name>` source port. Emits Context-only (same shape as deterministic router). Decision metadata (chosen route, confidence, reasoning, token usage) lands on the trace span as attributes. |
 | `llm_tools` | ReAct / function-calling primitive — multi-provider. Declare tools as `{name, description, inputSchema}` triples; each becomes an `out_<name>` source port that fires when the model picks that tool. Anthropic Messages tool_use and OpenAI Chat Completions function-calling share a single normalized `Message` shape: `{role, content, toolUses?, toolCallId?}`. Caller loop: take the response's `messages`, append `{role: "tool", toolCallId: "<id>", content: "<output>"}` for each tool result, re-call. Stateless. |
 | `llm_chat` | Stateless multi-turn conversation, Anthropic or OpenAI-compatible. Caller supplies the full `messages` history per call; component emits the updated history (with the assistant turn appended) plus the response text on the `response` port. Persist with `document_store` (or `kv`/`postgres_exec`) around the call: load → llm_chat → save. Use for pure conversation; use `llm_tools` when the agent needs to call tools. |
+| `mcp_tools` | List the tools a remote [MCP](https://modelcontextprotocol.io) server offers, emitted in `llm_tools`' declaration shape (`{name, description, inputSchema}`) so the entries paste straight into its `Tools` setting. |
+| `mcp_call` | Invoke one tool on a remote MCP server. Emits `{text, structured?, isError}` with the request context passed through, so the result folds back into an `llm_tools` loop. |
+
+## MCP: using a remote server's tools
+
+`mcp_tools` and `mcp_call` let an agent use any MCP server's tools — GitHub,
+Sentry, your own — without a component being written for each one. Streamable
+HTTP via the official Go SDK, so servers on current and older protocol
+revisions both work.
+
+**Discovery is a build-time step, by necessity.** `llm_tools` derives an
+`out_<tool>` port per tool declared in its **settings**, and settings are
+static, so a runtime tool list cannot create ports:
+
+1. Call `mcp_tools` once; read `result.tools`.
+2. Paste those entries into `llm_tools`' `Tools` setting — the shapes match, no
+   translation needed.
+3. Wire `llm_tools` `out_<tool>` → `mcp_call.request`, mapping the tool's name
+   to `tool` and `{{$.input}}` to `arguments`.
+4. Fold the result back: `mcp_call.result` → `js_eval` appending
+   `{role: "tool", toolCallId: <the toolUseId carried in context>, content: <result.text>}`
+   to `messages` → `llm_tools.request`. Loop until `llm_tools`' `response` fires.
+
+Carry loop state (`toolUseId`, `messages`, `apiKey`) through `mcp_call`'s
+`context`, which passes through untouched.
+
+**Set `disableParallelToolUse` on `llm_tools`.** It routes only the *first* tool
+call of a turn to a port; if the model calls several and the loop returns one
+result, the next provider call fails with `tool_use ids without tool_result`.
+
+**Ports.** `mcp_tools`: `request` ← `{context?, token?}`, `result` →
+`{context, server, tools[], count}`. `mcp_call`: `request` ←
+`{context?, tool, arguments?, token?}`, `result` →
+`{context, tool, text, structured?, isError}`. Both take `serverURL`,
+`headers[]`, `timeoutSeconds`, `enableErrorPort` in settings, and both emit
+`{context, error, retryable}` on `error` when it is enabled.
+
+`text` is every text block joined by newlines — what a `{role: tool}` message
+wants. Leave `token` empty in settings and map it per-request from the trigger
+widget, so the credential is not stored in the flow.
+
+A tool that runs and reports its own failure arrives on `result` with
+`isError: true`, not on the `error` port; only transport and protocol failures go
+there, because only those are worth retrying. Connection and call failures are
+marked retryable and can be wired into `retry`.
 
 ## `llm_router`
 
