@@ -11,8 +11,10 @@ package llmcomplete
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tiny-systems/llm-module/internal/provider"
@@ -46,6 +48,7 @@ type Settings struct {
 	MaxTokens       int     `json:"maxTokens" required:"true" minimum:"1" default:"1024" title:"Max Tokens" description:"Maximum output tokens."`
 	Temperature     float64 `json:"temperature" minimum:"0" maximum:"1" title:"Temperature"`
 	TimeoutSeconds  int     `json:"timeoutSeconds" minimum:"1" default:"60" title:"Timeout Seconds"`
+	OutputSchema    string  `json:"outputSchema,omitempty" title:"Output JSON Schema" format:"code" language:"json" description:"Optional JSON Schema the answer must conform to. When set, the model is forced to reply as matching JSON (Anthropic: forced tool call; OpenAI: response_format json_schema strict) and the parsed object is emitted on response.structured instead of free text." tab:"Settings"`
 }
 
 type Request struct {
@@ -64,6 +67,7 @@ type Usage struct {
 type Response struct {
 	Context    Context `json:"context,omitempty" configurable:"true" title:"Context"`
 	Text       string  `json:"text" title:"Text"`
+	Structured any     `json:"structured,omitempty" title:"Structured" description:"Parsed object conforming to the settings Output JSON Schema; empty when no schema is set"`
 	Model      string  `json:"model" title:"Model"`
 	StopReason string  `json:"stopReason" title:"Stop Reason"`
 	Usage      Usage   `json:"usage" title:"Usage"`
@@ -95,7 +99,7 @@ func (c *Component) GetInfo() module.ComponentInfo {
 	return module.ComponentInfo{
 		Name:        ComponentName,
 		Description: "LLM Complete",
-		Info:        "Single-turn completion. Defaults to Anthropic's Messages API (with prompt caching on the system prompt); switch Provider to 'openai' for OpenAI Chat Completions or any OpenAI-compatible endpoint (Ollama, vLLM, OpenRouter, Azure OpenAI) via BaseURL. Emits text, model, usage, and stop reason on success; routes 429/529/5xx errors with retryable=true so upstream can decide whether to retry.",
+		Info:        "Single-turn completion. Defaults to Anthropic's Messages API (with prompt caching on the system prompt); switch Provider to 'openai' for OpenAI Chat Completions or any OpenAI-compatible endpoint (Ollama, vLLM, OpenRouter, Azure OpenAI) via BaseURL. Emits text, model, usage, and stop reason on success; routes 429/529/5xx errors with retryable=true so upstream can decide whether to retry. Set Output JSON Schema in settings to force a schema-conforming reply: the parsed object lands on response.structured (read $.structured.<field>).",
 		Tags:        []string{"LLM", "Anthropic", "OpenAI", "Claude"},
 	}
 }
@@ -159,6 +163,13 @@ func (c *Component) complete(ctx context.Context, handler module.Handler, in Req
 		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey, or carry it per request as Request.APIKey (e.g. from the trigger widget the user fills)"), false)
 	}
 
+	var outputSchema map[string]any
+	if strings.TrimSpace(c.settings.OutputSchema) != "" {
+		if err := json.Unmarshal([]byte(c.settings.OutputSchema), &outputSchema); err != nil {
+			return c.fail(ctx, handler, in.Context, fmt.Errorf("outputSchema is not valid JSON: %w", err), false)
+		}
+	}
+
 	resp, err := p.Complete(ctx, provider.CompletionRequest{
 		APIKey:       apiKey,
 		BaseURL:      c.settings.BaseURL,
@@ -168,9 +179,10 @@ func (c *Component) complete(ctx context.Context, handler module.Handler, in Req
 		Messages: []provider.Message{
 			{Role: "user", Content: in.UserMessage},
 		},
-		MaxTokens:   maxTokens,
-		Temperature: c.settings.Temperature,
-		Timeout:     timeout,
+		MaxTokens:    maxTokens,
+		Temperature:  c.settings.Temperature,
+		Timeout:      timeout,
+		OutputSchema: outputSchema,
 	})
 	if err != nil {
 		var perr *provider.Error
@@ -182,6 +194,7 @@ func (c *Component) complete(ctx context.Context, handler module.Handler, in Req
 
 	out := Response{
 		Text:       resp.Text,
+		Structured: resp.Structured,
 		Model:      resp.Model,
 		StopReason: resp.StopReason,
 		Usage: Usage{

@@ -21,10 +21,22 @@ type openaiMessage struct {
 }
 
 type openaiRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openaiMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
+	Model          string                `json:"model"`
+	Messages       []openaiMessage       `json:"messages"`
+	MaxTokens      int                   `json:"max_tokens,omitempty"`
+	Temperature    *float64              `json:"temperature,omitempty"`
+	ResponseFormat *openaiResponseFormat `json:"response_format,omitempty"`
+}
+
+type openaiResponseFormat struct {
+	Type       string            `json:"type"`
+	JSONSchema *openaiJSONSchema `json:"json_schema,omitempty"`
+}
+
+type openaiJSONSchema struct {
+	Name   string         `json:"name"`
+	Schema map[string]any `json:"schema"`
+	Strict bool           `json:"strict"`
 }
 
 type openaiResponseChoice struct {
@@ -69,6 +81,12 @@ func (p *openaiProvider) Complete(ctx context.Context, in CompletionRequest) (*C
 		Messages:    apiMessages,
 		MaxTokens:   in.MaxTokens,
 		Temperature: &in.Temperature,
+	}
+	if in.OutputSchema != nil {
+		body.ResponseFormat = &openaiResponseFormat{
+			Type:       "json_schema",
+			JSONSchema: &openaiJSONSchema{Name: "structured_output", Schema: in.OutputSchema, Strict: true},
+		}
 	}
 
 	payload, err := json.Marshal(body)
@@ -127,7 +145,15 @@ func (p *openaiProvider) Complete(ctx context.Context, in CompletionRequest) (*C
 
 	text, _ := parsed.Choices[0].Message.Content.(string)
 
+	var structured any
+	if in.OutputSchema != nil {
+		if err := json.Unmarshal([]byte(text), &structured); err != nil {
+			return nil, &Error{Err: fmt.Errorf("model reply is not valid JSON despite json_schema response_format: %w", err)}
+		}
+	}
+
 	return &CompletionResponse{
+		Structured: structured,
 		Text:       text,
 		Model:      parsed.Model,
 		StopReason: parsed.Choices[0].FinishReason,

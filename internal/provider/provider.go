@@ -32,6 +32,11 @@ type CompletionRequest struct {
 	MaxTokens    int
 	Temperature  float64
 	Timeout      time.Duration
+	// OutputSchema, when non-nil, forces the model to answer as JSON
+	// matching this schema (Anthropic: forced tool call; OpenAI:
+	// response_format json_schema strict). The parsed object lands on
+	// CompletionResponse.Structured.
+	OutputSchema map[string]any
 }
 
 type Usage struct {
@@ -43,6 +48,7 @@ type Usage struct {
 
 type CompletionResponse struct {
 	Text       string
+	Structured any
 	Model      string
 	StopReason string
 	Usage      Usage

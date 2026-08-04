@@ -18,8 +18,10 @@ package llmchat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tiny-systems/llm-module/internal/provider"
@@ -65,6 +67,7 @@ type Settings struct {
 	MaxTokens       int     `json:"maxTokens" required:"true" minimum:"1" default:"1024" title:"Max Tokens"`
 	Temperature     float64 `json:"temperature" minimum:"0" maximum:"1" title:"Temperature"`
 	TimeoutSeconds  int     `json:"timeoutSeconds" minimum:"1" default:"60" title:"Timeout Seconds"`
+	OutputSchema    string  `json:"outputSchema,omitempty" title:"Output JSON Schema" format:"code" language:"json" description:"Optional JSON Schema the answer must conform to. When set, the model is forced to reply as matching JSON (Anthropic: forced tool call; OpenAI: response_format json_schema strict) and the parsed object is emitted on response.structured instead of free text." tab:"Settings"`
 }
 
 type Request struct {
@@ -83,6 +86,7 @@ type Usage struct {
 type Response struct {
 	Context    Context   `json:"context"`
 	Text       string    `json:"text" description:"The assistant's reply text. Convenience field — also present as the last entry in Messages."`
+	Structured any       `json:"structured,omitempty" title:"Structured" description:"Parsed object conforming to the settings Output JSON Schema; empty when no schema is set"`
 	Messages   []Message `json:"messages" description:"Input messages plus the assistant's reply appended. Save this back to your storage component to continue the conversation later."`
 	Model      string    `json:"model"`
 	StopReason string    `json:"stopReason"`
@@ -113,7 +117,7 @@ func (c *Component) GetInfo() module.ComponentInfo {
 	return module.ComponentInfo{
 		Name:        ComponentName,
 		Description: "LLM Chat",
-		Info: "Stateless multi-turn conversation primitive. Caller supplies the full Messages history per " +
+		Info: "Stateless multi-turn conversation primitive. Caller supplies the full Messages history per  Set Output JSON Schema in settings to force a schema-conforming reply on response.structured." +
 			"call; component makes the API call and emits the updated history (with the assistant turn appended) " +
 			"on Response.Messages. Persist via document_store or kv around llm_chat: load → llm_chat → save. " +
 			"Defaults to Anthropic's Messages API; switch Provider to 'openai' for OpenAI Chat Completions or " +
@@ -187,6 +191,13 @@ func (c *Component) chat(ctx context.Context, handler module.Handler, in Request
 		pmsgs[i] = provider.Message{Role: m.Role, Content: m.Content}
 	}
 
+	var outputSchema map[string]any
+	if strings.TrimSpace(c.settings.OutputSchema) != "" {
+		if err := json.Unmarshal([]byte(c.settings.OutputSchema), &outputSchema); err != nil {
+			return c.fail(ctx, handler, in.Context, fmt.Errorf("outputSchema is not valid JSON: %w", err), false)
+		}
+	}
+
 	resp, err := p.Complete(ctx, provider.CompletionRequest{
 		APIKey:       apiKey,
 		BaseURL:      c.settings.BaseURL,
@@ -197,6 +208,7 @@ func (c *Component) chat(ctx context.Context, handler module.Handler, in Request
 		MaxTokens:    maxTokens,
 		Temperature:  c.settings.Temperature,
 		Timeout:      timeout,
+		OutputSchema: outputSchema,
 	})
 	if err != nil {
 		var perr *provider.Error
@@ -213,6 +225,7 @@ func (c *Component) chat(ctx context.Context, handler module.Handler, in Request
 
 	out := Response{
 		Text:       resp.Text,
+		Structured: resp.Structured,
 		Messages:   updated,
 		Model:      resp.Model,
 		StopReason: resp.StopReason,

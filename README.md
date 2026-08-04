@@ -88,6 +88,7 @@ Decision metadata lands on the trace span via these attributes:
 | `systemPrompt` | *(empty)* | Sent as system role on every call. |
 | `cacheSystem` | `false` | Anthropic only. Mark the system prompt as `ephemeral` so identical subsequent calls hit the prompt cache. Ignored on `openai`. |
 | `maxTokens` | `1024` | Output token cap. |
+| `outputSchema` | _empty_ | Optional JSON Schema; when set the reply is forced to conform (Anthropic: forced tool call, OpenAI: `response_format` json_schema strict) and the parsed object is emitted on `response.structured`. |
 | `temperature` | `0` | Sent explicitly (0 = deterministic-ish). Set higher for sampling diversity. |
 | `timeoutSeconds` | `60` | Per-request HTTP timeout. |
 

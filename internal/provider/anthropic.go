@@ -38,6 +38,8 @@ type anthropicRequest struct {
 	Temperature *float64             `json:"temperature,omitempty"`
 	System      []anthropicTextBlock `json:"system,omitempty"`
 	Messages    []anthropicMessage   `json:"messages"`
+	Tools       []anthropicToolDef   `json:"tools,omitempty"`
+	ToolChoice  *anthropicToolChoice `json:"tool_choice,omitempty"`
 }
 
 type anthropicResponseUsage struct {
@@ -48,8 +50,9 @@ type anthropicResponseUsage struct {
 }
 
 type anthropicResponseContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type  string `json:"type"`
+	Text  string `json:"text"`
+	Input any    `json:"input,omitempty"`
 }
 
 type anthropicResponse struct {
@@ -67,6 +70,10 @@ type anthropicErrorBody struct {
 type anthropicErrorEnvelope struct {
 	Error anthropicErrorBody `json:"error"`
 }
+
+// structuredOutputTool is the synthetic tool name used to force schema-
+// conforming answers on the Anthropic path.
+const structuredOutputTool = "structured_output"
 
 func (p *anthropicProvider) Complete(ctx context.Context, in CompletionRequest) (*CompletionResponse, error) {
 	url := in.BaseURL
@@ -91,6 +98,17 @@ func (p *anthropicProvider) Complete(ctx context.Context, in CompletionRequest) 
 			block.CacheControl = &anthropicCacheControl{Type: "ephemeral"}
 		}
 		body.System = []anthropicTextBlock{block}
+	}
+	if in.OutputSchema != nil {
+		// Structured output on Anthropic is a forced tool call: one tool
+		// whose input schema IS the output schema; the tool_use input is
+		// the structured answer.
+		body.Tools = []anthropicToolDef{{
+			Name:        structuredOutputTool,
+			Description: "Emit the answer as structured data matching the schema.",
+			InputSchema: in.OutputSchema,
+		}}
+		body.ToolChoice = &anthropicToolChoice{Type: "tool", Name: structuredOutputTool}
 	}
 
 	payload, err := json.Marshal(body)
@@ -145,14 +163,22 @@ func (p *anthropicProvider) Complete(ctx context.Context, in CompletionRequest) 
 	}
 
 	var text string
+	var structured any
 	for _, block := range parsed.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			text += block.Text
+		case "tool_use":
+			structured = block.Input
 		}
+	}
+	if in.OutputSchema != nil && structured == nil {
+		return nil, &Error{Err: fmt.Errorf("model returned no structured output (stop_reason %s)", parsed.StopReason)}
 	}
 
 	return &CompletionResponse{
 		Text:       text,
+		Structured: structured,
 		Model:      parsed.Model,
 		StopReason: parsed.StopReason,
 		Usage: Usage{
@@ -201,6 +227,7 @@ type anthropicToolRequest struct {
 // tool call per assistant turn.
 type anthropicToolChoice struct {
 	Type                   string `json:"type"`
+	Name                   string `json:"name,omitempty"`
 	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
 }
 
