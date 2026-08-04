@@ -40,7 +40,7 @@ type Settings struct {
 	Provider        string  `json:"provider" required:"true" enum:"anthropic,openai" default:"anthropic" title:"Provider" description:"LLM backend. 'anthropic' uses the Messages API and supports prompt caching on the system prompt. 'openai' uses the Chat Completions API and also works with any OpenAI-compatible endpoint (Ollama, vLLM, OpenRouter, Azure OpenAI, Together) via BaseURL."`
 	BaseURL         string  `json:"baseURL" title:"Base URL" description:"Optional override for self-hosted or third-party endpoints. For openai-compatible servers, pass the v1 base (e.g. http://ollama:11434/v1). Leave blank for the provider default."`
 	APIKey          string  `json:"apiKey" title:"API Key" format:"password" description:"API key for the provider. Overrides Request.apiKey when set. Leave EMPTY when the user supplies the key: the idiomatic shape is a masked field on the flow's trigger widget, carried here on the request edge, so nothing is provisioned per flow."`
-	Model           string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model" description:"Provider model ID (claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7 for anthropic; gpt-4o-mini, gpt-4o for openai; llama3.1 etc. for ollama)."`
+	Model           string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model" description:"Provider model ID (claude-haiku-4-5, claude-sonnet-5, claude-opus-5 for anthropic; gpt-4o-mini, gpt-4o for openai; llama3.1 etc. for ollama)."`
 	SystemPrompt    string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Sent as the system role on every request."`
 	CacheSystem     bool    `json:"cacheSystem" title:"Cache System Prompt" description:"Anthropic only: mark the system prompt as ephemeral so subsequent identical calls hit the prompt cache. Ignored on openai."`
 	MaxTokens       int     `json:"maxTokens" required:"true" minimum:"1" default:"1024" title:"Max Tokens" description:"Maximum output tokens."`
@@ -200,7 +200,12 @@ func (c *Component) complete(ctx context.Context, handler module.Handler, in Req
 }
 
 func (c *Component) fail(ctx context.Context, handler module.Handler, reqCtx Context, err error, retryable bool) module.Result {
-	if !retryable {
+	if retryable {
+		// Mark for the runtime's retry vocabulary: unmarked errors are
+		// never redelivered (module.ShouldRetry defaults to false), so a
+		// 429/529 must carry the transient marker to get a retry at all.
+		err = module.Retryable(err)
+	} else {
 		err = perrors.NewPermanentError(err)
 	}
 	if !c.settings.EnableErrorPort {

@@ -21,7 +21,7 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "server",
-	Short: "Tiny Systems LLM module — Anthropic completion and routing components",
+	Short: "Tiny Systems LLM module — chat, completion, tool-calling, routing, and MCP client components",
 	Run: func(cmd *cobra.Command, args []string) {
 		_ = cmd.Help()
 	},

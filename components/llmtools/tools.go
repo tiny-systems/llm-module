@@ -75,7 +75,7 @@ type Settings struct {
 	Temperature     float64 `json:"temperature" minimum:"0" maximum:"1" title:"Temperature"`
 	TimeoutSeconds  int     `json:"timeoutSeconds" minimum:"1" default:"60" title:"Timeout Seconds"`
 
-	DisableParallelToolUse bool `json:"disableParallelToolUse" title:"One Tool Per Turn" description:"Force the model to call at most one tool per turn (Anthropic tool_choice.disable_parallel_tool_use / OpenAI parallel_tool_calls=false). Recommended for the per-tool-port ReAct loop, which appends one tool result per branch and breaks if the model requests several tools at once."`
+	DisableParallelToolUse bool `json:"disableParallelToolUse" title:"One Tool Per Turn" description:"Force the model to call at most one tool per turn (Anthropic tool_choice.disable_parallel_tool_use / OpenAI parallel_tool_calls=false). Default on: the per-tool-port ReAct loop appends one tool result per branch and breaks if the model requests several tools at once. Turn off only if your flow routes every requested tool itself."`
 }
 
 // MessageToolUse is one tool invocation the model emitted in an
@@ -150,6 +150,12 @@ func (c *Component) Instance() module.Component {
 		Model:          defaultModel,
 		MaxTokens:      defaultMaxTokens,
 		TimeoutSeconds: int(defaultTimeout / time.Second),
+		// The per-tool-port ReAct loop appends one tool result per
+		// branch; parallel tool calls break it with a next-turn 400.
+		// One-tool-per-turn is the only default that works out of the
+		// box — authors who route all ToolUses themselves can turn it
+		// off.
+		DisableParallelToolUse: true,
 	}}
 }
 
@@ -372,7 +378,12 @@ func toolNames(tools []Tool) string {
 }
 
 func (c *Component) fail(ctx context.Context, handler module.Handler, reqCtx Context, err error, retryable bool) module.Result {
-	if !retryable {
+	if retryable {
+		// Mark for the runtime's retry vocabulary: unmarked errors are
+		// never redelivered (module.ShouldRetry defaults to false), so a
+		// 429/529 must carry the transient marker to get a retry at all.
+		err = module.Retryable(err)
+	} else {
 		err = perrors.NewPermanentError(err)
 	}
 	if !c.settings.EnableErrorPort {

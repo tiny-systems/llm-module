@@ -35,7 +35,7 @@ type anthropicMessage struct {
 type anthropicRequest struct {
 	Model       string               `json:"model"`
 	MaxTokens   int                  `json:"max_tokens"`
-	Temperature float64              `json:"temperature,omitempty"`
+	Temperature *float64             `json:"temperature,omitempty"`
 	System      []anthropicTextBlock `json:"system,omitempty"`
 	Messages    []anthropicMessage   `json:"messages"`
 }
@@ -82,7 +82,7 @@ func (p *anthropicProvider) Complete(ctx context.Context, in CompletionRequest) 
 	body := anthropicRequest{
 		Model:       in.Model,
 		MaxTokens:   in.MaxTokens,
-		Temperature: in.Temperature,
+		Temperature: &in.Temperature,
 		Messages:    apiMessages,
 	}
 	if in.SystemPrompt != "" {
@@ -189,7 +189,7 @@ type anthropicToolContentBlock struct {
 type anthropicToolRequest struct {
 	Model       string               `json:"model"`
 	MaxTokens   int                  `json:"max_tokens"`
-	Temperature float64              `json:"temperature,omitempty"`
+	Temperature *float64             `json:"temperature,omitempty"`
 	System      []anthropicTextBlock `json:"system,omitempty"`
 	Messages    []anthropicMessage   `json:"messages"`
 	Tools       []anthropicToolDef   `json:"tools,omitempty"`
@@ -220,7 +220,7 @@ func (p *anthropicProvider) CompleteWithTools(ctx context.Context, in ToolComple
 	body := anthropicToolRequest{
 		Model:       in.Model,
 		MaxTokens:   in.MaxTokens,
-		Temperature: in.Temperature,
+		Temperature: &in.Temperature,
 		Messages:    toolMessagesToAnthropic(in.Messages),
 		Tools:       toolDefsToAnthropic(in.Tools),
 	}

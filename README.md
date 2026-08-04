@@ -84,11 +84,11 @@ Decision metadata lands on the trace span via these attributes:
 |---|---|---|
 | `provider` | `anthropic` | `anthropic` or `openai`. Determines wire format, auth header, and which provider defaults apply. |
 | `baseURL` | *(empty)* | Optional override. For `openai`-compatible servers pass the v1 base (e.g. `http://ollama:11434/v1` or `https://openrouter.ai/api/v1`). Leave blank for the provider default. |
-| `model` | `claude-haiku-4-5` | Provider-specific model id. Anthropic: `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`. OpenAI: `gpt-4o-mini`, `gpt-4o`. Ollama: whatever you have pulled (`llama3.1`, `qwen2.5`, …). |
+| `model` | `claude-haiku-4-5` | Provider-specific model id. Anthropic: `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5`. OpenAI: `gpt-4o-mini`, `gpt-4o`. Ollama: whatever you have pulled (`llama3.1`, `qwen2.5`, …). |
 | `systemPrompt` | *(empty)* | Sent as system role on every call. |
 | `cacheSystem` | `false` | Anthropic only. Mark the system prompt as `ephemeral` so identical subsequent calls hit the prompt cache. Ignored on `openai`. |
 | `maxTokens` | `1024` | Output token cap. |
-| `temperature` | `0` | Set higher for sampling diversity. |
+| `temperature` | `0` | Sent explicitly (0 = deterministic-ish). Set higher for sampling diversity. |
 | `timeoutSeconds` | `60` | Per-request HTTP timeout. |
 
 The API key flows in via the input message (`apiKey`), not via component settings — same context-passthrough pattern other Tiny Systems modules use for credentials. The same field carries Anthropic `x-api-key` or OpenAI `Bearer` tokens depending on `provider`.
@@ -100,7 +100,7 @@ The output shape (`text`, `model`, `stopReason`, `usage`) is identical across pr
 - **Auth**: Anthropic sends `x-api-key` + `anthropic-version`; OpenAI sends `Authorization: Bearer …`.
 - **Prompt caching**: Anthropic-only via `cacheSystem`; OpenAI ignores the field.
 - **Usage**: `cacheRead` / `cacheCreation` are zero outside Anthropic.
-- **Tool use**: `llm_tools` is Anthropic-native and not portable; use `llm_complete` / `llm_chat` for the multi-provider path.
+- **Tool use**: `llm_tools` works on both providers since v0.8.0 (Anthropic tool_use and OpenAI function calling).
 
 ### Self-hosted via Ollama
 

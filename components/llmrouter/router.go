@@ -422,7 +422,12 @@ func extractJSON(s string) string {
 }
 
 func (c *Component) fail(ctx context.Context, handler module.Handler, reqCtx Context, err error, retryable bool) module.Result {
-	if !retryable {
+	if retryable {
+		// Mark for the runtime's retry vocabulary: unmarked errors are
+		// never redelivered (module.ShouldRetry defaults to false), so a
+		// 429/529 must carry the transient marker to get a retry at all.
+		err = module.Retryable(err)
+	} else {
 		err = perrors.NewPermanentError(err)
 	}
 	if !c.settings.EnableErrorPort {
