@@ -225,6 +225,10 @@ func (c *Component) invoke(ctx context.Context, handler module.Handler, in Reque
 		if model == "" {
 			model = defaultModel
 		}
+		maxTokens := c.settings.MaxTokens
+		if maxTokens <= 0 {
+			maxTokens = defaultMaxTokens
+		}
 
 		p, err := provider.New(c.settings.Provider)
 		if err != nil {
@@ -250,7 +254,7 @@ func (c *Component) invoke(ctx context.Context, handler module.Handler, in Reque
 			CacheSystem:  c.settings.CacheSystem,
 			Messages:     toProviderMessages(in.Messages),
 			Tools:        toProviderTools(c.settings.Tools),
-			MaxTokens:    c.settings.MaxTokens,
+			MaxTokens:    maxTokens,
 			Temperature:  c.settings.Temperature,
 			Timeout:      timeout,
 
