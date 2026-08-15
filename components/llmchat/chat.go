@@ -60,7 +60,6 @@ type Settings struct {
 	EnableErrorPort bool    `json:"enableErrorPort" required:"true" title:"Enable Error Port"`
 	Provider        string  `json:"provider" required:"true" enum:"anthropic,openai" default:"anthropic" title:"Provider" description:"LLM backend. 'anthropic' uses the Messages API and supports prompt caching on the system prompt. 'openai' uses the Chat Completions API and also works with any OpenAI-compatible endpoint (Ollama, vLLM, OpenRouter, Azure OpenAI, Together) via BaseURL."`
 	BaseURL         string  `json:"baseURL" title:"Base URL" description:"Optional override for self-hosted or third-party endpoints. For openai-compatible servers, pass the v1 base (e.g. http://ollama:11434/v1). Leave blank for the provider default."`
-	APIKey          string  `json:"apiKey" title:"API Key" format:"password" description:"API key for the provider. Overrides Request.apiKey when set. Leave EMPTY when the user supplies the key: the idiomatic shape is a masked field on the flow's trigger widget, carried here on the request edge, so nothing is provisioned per flow."`
 	Model           string  `json:"model" required:"true" minLength:"1" default:"claude-haiku-4-5" title:"Model"`
 	SystemPrompt    string  `json:"systemPrompt" title:"System Prompt" format:"textarea" description:"Frames the assistant's role and behaviour across all turns."`
 	CacheSystem     bool    `json:"cacheSystem" title:"Cache System Prompt" description:"Anthropic only: mark the system prompt as ephemeral so identical subsequent calls hit Anthropic's prompt cache. Big win for long system prompts. Ignored on openai."`
@@ -72,7 +71,7 @@ type Settings struct {
 
 type Request struct {
 	Context  Context   `json:"context,omitempty" configurable:"true" title:"Context" description:"Passthrough emitted on whichever output port fires."`
-	APIKey   string    `json:"apiKey,omitempty" title:"API Key" format:"password" description:"Anthropic x-api-key or OpenAI Bearer token. Usually left empty here and carried per-request from the trigger widget the user fills (map it onto the request edge as apiKey). Settings.APIKey takes precedence if set."`
+	APIKey   string    `json:"apiKey,omitempty" title:"API Key" format:"password" description:"Anthropic x-api-key or OpenAI Bearer token. Usually left empty here and carried per-request from the trigger widget the user fills (map it onto the request edge as apiKey)."`
 	Messages []Message `json:"messages" required:"true" minItems:"1" title:"Messages" description:"Full conversation history, ending with the new user turn. Load from your storage component before this call; save Response.messages back after."`
 }
 
@@ -175,15 +174,12 @@ func (c *Component) chat(ctx context.Context, handler module.Handler, in Request
 		return c.fail(ctx, handler, in.Context, err, false)
 	}
 
-	apiKey := c.settings.APIKey
-	if apiKey == "" {
-		apiKey = in.APIKey
-	}
+	apiKey := in.APIKey
 	if apiKey == "" {
 		apiKey = provider.EnvAPIKey(c.settings.Provider)
 	}
 	if apiKey == "" {
-		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: set Settings.APIKey, or carry it per request as Request.APIKey (e.g. from the trigger widget the user fills)"), false)
+		return c.fail(ctx, handler, in.Context, fmt.Errorf("api key missing: carry it per request as Request.APIKey (e.g. from the trigger widget the user fills), or set the provider env key on the module pod"), false)
 	}
 
 	pmsgs := make([]provider.Message, len(in.Messages))

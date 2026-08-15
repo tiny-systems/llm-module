@@ -10,7 +10,7 @@ import "os"
 // gives the memory components.
 //
 // Returns "" when no env key is set, so callers still require an explicit
-// Settings.APIKey / Request.APIKey exactly as before (non-breaking): the
+// Request.APIKey exactly as before (non-breaking): the
 // fallback only activates where an operator deliberately provided one.
 func EnvAPIKey(providerName string) string {
 	switch providerName {

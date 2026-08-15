@@ -24,7 +24,7 @@ type Context any
 
 type Settings struct {
 	ServerURL       string           `json:"serverURL" required:"true" title:"Server URL" description:"MCP server endpoint, e.g. https://api.githubcopilot.com/mcp/ — must speak Streamable HTTP."`
-	Headers         []mcpclient.Header `json:"headers,omitempty" title:"Extra Headers" description:"Sent with every request. For servers that authenticate with a custom header instead of a bearer token."`
+	Headers         []mcpclient.Header `json:"headers,omitempty" title:"Extra Headers" description:"Non-secret headers sent with every request (version pins etc.). Never put credentials here — settings are stored with the flow; carry auth per request via Token or Request.headers."`
 	TimeoutSeconds  int              `json:"timeoutSeconds" required:"true" title:"Timeout (seconds)"`
 	EnableErrorPort bool             `json:"enableErrorPort" title:"Enable Error Port" description:"Emit failures on the error port instead of failing the flow. A tool that reports its own error still arrives on the result port with isError set."`
 }
@@ -34,6 +34,7 @@ type Request struct {
 	Tool      string  `json:"tool" required:"true" title:"Tool" description:"Remote tool name, exactly as mcp_tools reported it."`
 	Arguments any     `json:"arguments,omitempty" configurable:"true" title:"Arguments" description:"Tool arguments, matching that tool's inputSchema. Map llm_tools' {{$.input}} straight in."`
 	Token     string  `json:"token,omitempty" format:"password" title:"Bearer Token" description:"Carried per-request from the trigger widget the user fills, so the credential is not stored in the flow."`
+	Headers   []mcpclient.Header `json:"headers,omitempty" title:"Extra Headers" description:"Per-request headers, merged over Settings.Headers (same key wins). The place for custom auth headers, so the secret rides the message instead of being stored in the flow."`
 }
 
 type Result struct {
@@ -95,7 +96,7 @@ func (c *Component) Handle(ctx context.Context, handler module.Handler, port str
 	sess, err := mcpclient.Open(ctx, mcpclient.Config{
 		Endpoint:       c.settings.ServerURL,
 		BearerToken:    in.Token,
-		Headers:        mcpclient.HeaderMap(c.settings.Headers),
+		Headers:        mcpclient.HeaderMap(append(append([]mcpclient.Header{}, c.settings.Headers...), in.Headers...)),
 		TimeoutSeconds: c.settings.TimeoutSeconds,
 	})
 	if err != nil {
