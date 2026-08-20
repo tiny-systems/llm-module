@@ -11,11 +11,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	_ "github.com/tiny-systems/llm-module/components/llmchat"
-	_ "github.com/tiny-systems/llm-module/components/mcpcall"
-	_ "github.com/tiny-systems/llm-module/components/mcptools"
 	_ "github.com/tiny-systems/llm-module/components/llmcomplete"
 	_ "github.com/tiny-systems/llm-module/components/llmrouter"
+	_ "github.com/tiny-systems/llm-module/components/llmtoolresult"
 	_ "github.com/tiny-systems/llm-module/components/llmtools"
+	_ "github.com/tiny-systems/llm-module/components/mcpcall"
+	_ "github.com/tiny-systems/llm-module/components/mcptools"
 	"github.com/tiny-systems/module/cli"
 )
 

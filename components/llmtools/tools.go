@@ -115,6 +115,7 @@ type ToolCall struct {
 	Messages  []Message `json:"messages" title:"Messages" description:"Updated history including the assistant turn that called this tool. Append a {role: tool, toolCallId: '<id>', content: '<output>'} and re-call to continue."`
 	ToolUseID string    `json:"toolUseId" title:"Tool Use Id" description:"Use this as toolCallId on the next-turn tool message."`
 	Input     any       `json:"input" title:"Input" description:"Structured arguments per the tool's inputSchema."`
+	Usage     Usage     `json:"usage" title:"Usage" description:"Tokens the turn that produced this tool call cost. Present here as well as on response because in a tool-using loop EVERY spending turn leaves through a tool port — a budget that only watched the final reply would see zero."`
 }
 
 type Usage struct {
@@ -306,6 +307,7 @@ func (c *Component) invoke(ctx context.Context, handler module.Handler, in Reque
 			Messages:  updated,
 			ToolUseID: first.ID,
 			Input:     first.Input,
+			Usage:     usage,
 		})
 	}
 
