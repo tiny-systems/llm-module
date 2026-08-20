@@ -13,7 +13,9 @@ package provider
 
 import (
 	"context"
+
 	"fmt"
+	m "github.com/tiny-systems/module/module"
 	"time"
 )
 
@@ -143,4 +145,23 @@ func New(name string) (Provider, error) {
 	default:
 		return nil, fmt.Errorf("unknown provider %q (supported: anthropic, openai)", name)
 	}
+}
+
+// MeterUsage reports a completed call's token counts to the runtime, in the
+// units the provider itself billed.
+//
+// Reported here rather than in each component because this is the one place
+// that knows a paid call actually happened: a component reading its own
+// response could double-count a cached replay, and a new component using this
+// package would have to remember to meter at all.
+//
+// Cached reads and cache writes are separate units on purpose — they are
+// priced differently, and folding them into input tokens would make a cache
+// that is working look like one that is not.
+func MeterUsage(ctx context.Context, u Usage) {
+	m.Meter(ctx, "llm_input_tokens", float64(u.Input))
+	m.Meter(ctx, "llm_output_tokens", float64(u.Output))
+	m.Meter(ctx, "llm_cache_read_tokens", float64(u.CacheRead))
+	m.Meter(ctx, "llm_cache_write_tokens", float64(u.CacheCreation))
+	m.Meter(ctx, "llm_calls", 1)
 }

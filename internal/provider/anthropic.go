@@ -176,17 +176,20 @@ func (p *anthropicProvider) Complete(ctx context.Context, in CompletionRequest) 
 		return nil, &Error{Err: fmt.Errorf("model returned no structured output (stop_reason %s)", parsed.StopReason)}
 	}
 
+	usage := Usage{
+		Input:         parsed.Usage.InputTokens,
+		Output:        parsed.Usage.OutputTokens,
+		CacheRead:     parsed.Usage.CacheReadInputTokens,
+		CacheCreation: parsed.Usage.CacheCreationInputTokens,
+	}
+	MeterUsage(ctx, usage)
+
 	return &CompletionResponse{
 		Text:       text,
 		Structured: structured,
 		Model:      parsed.Model,
 		StopReason: parsed.StopReason,
-		Usage: Usage{
-			Input:         parsed.Usage.InputTokens,
-			Output:        parsed.Usage.OutputTokens,
-			CacheRead:     parsed.Usage.CacheReadInputTokens,
-			CacheCreation: parsed.Usage.CacheCreationInputTokens,
-		},
+		Usage:      usage,
 	}, nil
 }
 
@@ -328,17 +331,20 @@ func (p *anthropicProvider) CompleteWithTools(ctx context.Context, in ToolComple
 		}
 	}
 
+	usage := Usage{
+		Input:         parsed.Usage.InputTokens,
+		Output:        parsed.Usage.OutputTokens,
+		CacheRead:     parsed.Usage.CacheReadInputTokens,
+		CacheCreation: parsed.Usage.CacheCreationInputTokens,
+	}
+	MeterUsage(ctx, usage)
+
 	return &ToolCompletionResponse{
 		Text:       text,
 		ToolUses:   uses,
 		Model:      parsed.Model,
 		StopReason: parsed.StopReason,
-		Usage: Usage{
-			Input:         parsed.Usage.InputTokens,
-			Output:        parsed.Usage.OutputTokens,
-			CacheRead:     parsed.Usage.CacheReadInputTokens,
-			CacheCreation: parsed.Usage.CacheCreationInputTokens,
-		},
+		Usage:      usage,
 	}, nil
 }
 
