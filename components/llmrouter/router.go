@@ -203,6 +203,13 @@ func (c *Component) route(ctx context.Context, handler module.Handler, in Reques
 		}
 		dec = d
 		usage = u
+		// This component calls the API directly rather than through
+		// internal/provider, so it meters here. Same units as every other paid
+		// call, so a run totalling its cost does not have to know which
+		// component made which request.
+		module.Meter(ctx, "llm_input_tokens", float64(usage.input))
+		module.Meter(ctx, "llm_output_tokens", float64(usage.output))
+		module.Meter(ctx, "llm_calls", 1)
 		// Cache the moment the paid call returns — before any downstream dispatch.
 		stepcache.Put(ctx, c.State(), dec)
 	}
@@ -223,8 +230,6 @@ func (c *Component) route(ctx context.Context, handler module.Handler, in Reques
 		attribute.Float64("llm_router.confidence", dec.Confidence),
 		attribute.String("llm_router.reasoning", dec.Reasoning),
 		attribute.String("llm_router.model", model),
-		attribute.Int("llm_router.input_tokens", usage.input),
-		attribute.Int("llm_router.output_tokens", usage.output),
 	)
 
 	if c.settings.EnableDefaultPort && c.settings.ConfidenceThreshold > 0 &&
